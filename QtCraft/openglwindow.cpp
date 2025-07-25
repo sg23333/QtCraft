@@ -175,20 +175,89 @@ void OpenGLWindow::initializeGL()
 }
 
 // --- 改动点: 更新世界生成 ---
-void OpenGLWindow::generateWorld() {
-    int world_size = 4;
-    for (int x = 0; x < world_size; ++x) {
-        for (int z = 0; z < world_size; ++z) {
-            glm::ivec3 chunk_coords(x, 0, z);
-            Chunk* new_chunk = new Chunk();
-            m_chunks[chunk_coords] = new_chunk;
+// 在 openglwindow.cpp 中找到并替换下面的函数
 
-            for (int bx = 0; bx < Chunk::CHUNK_SIZE; ++bx) {
-                for (int bz = 0; bz < Chunk::CHUNK_SIZE; ++bz) {
-                    new_chunk->blocks[bx][0][bz] = 1; // 最底层为石头
-                    new_chunk->blocks[bx][1][bz] = 2; // 中间层为泥土
-                    new_chunk->blocks[bx][2][bz] = 3; // 最上层为草方块
+// --- 新增: 单个区块地形生成函数 ---
+void OpenGLWindow::generateChunk(Chunk* chunk, const glm::ivec3& chunk_coords)
+{
+    FastNoiseLite noise;
+    noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+
+    FastNoiseLite distortion_noise;
+    distortion_noise.SetNoiseType(FastNoiseLite::NoiseType_Perlin);
+    distortion_noise.SetFrequency(0.05f);
+
+    // 您修改后的参数
+    int octaves = 5;
+    float persistence = 0.5f;
+    float lacunarity = 2.2f;
+    float base_frequency = 0.1f;
+    float base_amplitude = 20.0f;
+    float distortion_strength = 10.0f;
+
+    for (int x = 0; x < Chunk::CHUNK_SIZE; ++x) {
+        for (int z = 0; z < Chunk::CHUNK_SIZE; ++z) {
+            int world_x = chunk_coords.x * Chunk::CHUNK_SIZE + x;
+            int world_z = chunk_coords.z * Chunk::CHUNK_SIZE + z;
+
+            float distortion_x = distortion_noise.GetNoise((float)world_x, (float)world_z) * distortion_strength;
+            float distortion_z = distortion_noise.GetNoise((float)world_x + 543.21f, (float)world_z - 123.45f) * distortion_strength;
+
+            float total_noise = 0.0f;
+            float frequency = base_frequency;
+            float amplitude = base_amplitude;
+
+            for (int i = 0; i < octaves; ++i) {
+                total_noise += noise.GetNoise(
+                                   (float)world_x * frequency + distortion_x,
+                                   (float)world_z * frequency + distortion_z
+                                   ) * amplitude;
+                amplitude *= persistence;
+                frequency *= lacunarity;
+            }
+
+            int sea_level = 8; // 您可以调整海平面高度
+            int terrain_height = static_cast<int>(total_noise) + sea_level;
+
+            for (int y = 0; y < Chunk::CHUNK_SIZE; ++y) {
+                int world_y = chunk_coords.y * Chunk::CHUNK_SIZE + y;
+
+                if (world_y > terrain_height) {
+                    if (world_y <= sea_level) {
+                        // --- 核心改动：生成水方块 ---
+                        chunk->blocks[x][y][z] = 4; // 4 是我们定义的水方块ID
+                    } else {
+                        chunk->blocks[x][y][z] = 0; // 空气
+                    }
+                } else {
+                    if (world_y == terrain_height && world_y > sea_level) {
+                        chunk->blocks[x][y][z] = 3; // 草
+                    } else if (world_y > terrain_height - 5) {
+                        chunk->blocks[x][y][z] = 2; // 泥土
+                    } else {
+                        chunk->blocks[x][y][z] = 1; // 石头
+                    }
                 }
+            }
+        }
+    }
+}
+
+
+// --- 改动点: 更新世界生成逻辑，增加垂直区块 ---
+void OpenGLWindow::generateWorld() {
+    int world_size_in_chunks = 8;
+    int world_height_in_chunks = 4; // 世界垂直高度为4个区块 (64个方块高)
+
+    // 循环创建所有区块
+    for (int x = -world_size_in_chunks / 2; x < world_size_in_chunks / 2; ++x) {
+        for (int z = -world_size_in_chunks / 2; z < world_size_in_chunks / 2; ++z) {
+            for (int y = -1; y < world_height_in_chunks-1; ++y) { // 从y=-1开始，让世界可以有更深的地下
+                glm::ivec3 chunk_coords(x, y, z);
+                Chunk* new_chunk = new Chunk();
+                m_chunks[chunk_coords] = new_chunk;
+
+                generateChunk(new_chunk, chunk_coords);
             }
         }
     }
@@ -227,7 +296,11 @@ void OpenGLWindow::paintGL()
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     // --- 1. 绘制3D世界 ---
+    // !! 核心改动：在绘制世界前开启混合 !!
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
     m_program.bind();
     glActiveTexture(GL_TEXTURE0);
     m_texture_atlas->bind();
@@ -250,19 +323,18 @@ void OpenGLWindow::paintGL()
     m_program.release();
 
 
-    // --- 2. 绘制2D准星 (使用OpenGL) ---
+    // --- 2. 绘制2D准星 (绘制准星前关闭混合，因为它是不透明的) ---
+    glDisable(GL_BLEND); // <-- 关闭混合，避免影响后续的2D渲染
     glDisable(GL_DEPTH_TEST);
-    m_crosshair_program.bind();
 
+    m_crosshair_program.bind();
     float w = width();
     float h = height();
     glm::mat4 proj = glm::ortho(-w/2.0f, w/2.0f, -h/2.0f, h/2.0f, -1.0f, 1.0f);
     glUniformMatrix4fv(m_crosshair_proj_matrix_location, 1, GL_FALSE, glm::value_ptr(proj));
-
     m_crosshair_vao.bind();
     glDrawArrays(GL_LINES, 0, 4);
     m_crosshair_vao.release();
-
     m_crosshair_program.release();
 }
 
@@ -611,58 +683,59 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk, const glm::ivec3& chunk_coords)
                 uint8_t block_id = chunk->blocks[x][y][z];
                 if (block_id == 0) continue;
 
-                glm::ivec3 block_pos(x, y, z);
+                // --- 新增：判断当前方块是否透明 ---
+                bool is_current_block_transparent = (block_id == 4);
 
+                glm::ivec3 block_pos(x, y, z);
                 const glm::ivec3 neighbors[6] = {
                     { 0,  0,  1}, { 0,  0, -1}, { 0,  1,  0},
                     { 0, -1,  0}, { 1,  0,  0}, {-1,  0,  0}
                 };
 
-                for (int i = 0; i < 6; ++i) { // i是面的索引: 0-前, 1-后, 2-上, 3-下, 4-右, 5-左
-                    glm::ivec3 neighbor_pos = block_pos + neighbors[i];
-                    glm::ivec3 neighbor_world_pos = chunk_coords * Chunk::CHUNK_SIZE + neighbor_pos;
+                for (int i = 0; i < 6; ++i) {
+                    glm::ivec3 neighbor_world_pos = chunk_coords * Chunk::CHUNK_SIZE + block_pos + neighbors[i];
+                    uint8_t neighbor_id = getBlock(neighbor_world_pos);
 
-                    if (getBlock(neighbor_world_pos) == 0) {
+                    // --- 核心改动：新的面剔除逻辑 ---
+                    bool should_draw_face = false;
+                    if (is_current_block_transparent) {
+                        // 透明方块(水)只在与不同类型的方块相邻时绘制面
+                        if (neighbor_id != block_id) {
+                            should_draw_face = true;
+                        }
+                    } else {
+                        // 不透明方块(石头、草等)在与透明方块(空气、水)相邻时绘制面
+                        if (neighbor_id == 0 || neighbor_id == 4) {
+                            should_draw_face = true;
+                        }
+                    }
 
+                    if (should_draw_face) {
                         // --- 核心纹理选择逻辑 ---
-                        // 假设图集有4个纹理：0=原石, 1=泥土, 2=草顶, 3=草侧
-                        float atlas_width = 4.0f; // 更新图集宽度
+                        float atlas_width = 5.0f; // !! 改动：图集现在有5个纹理
                         float tile_width = 1.0f / atlas_width;
                         float u_offset = 0.0f;
-
                         int texture_index = 0;
 
                         switch (block_id) {
-                        case 1: // 原石
-                            texture_index = 0; // 所有面都使用原石纹理
-                            break;
-                        case 2: // 泥土
-                            texture_index = 1; // 所有面都使用泥土纹理
-                            break;
+                        case 1: texture_index = 0; break; // 原石
+                        case 2: texture_index = 1; break; // 泥土
                         case 3: // 草方块
                             switch (i) {
-                            case 2: // 顶面 (+y)
-                                texture_index = 2; // 草顶纹理
-                                break;
-                            case 3: // 底面 (-y)
-                                texture_index = 1; // 泥土纹理
-                                break;
-                            default: // 所有侧面
-                                texture_index = 3; // 草侧纹理
-                                break;
+                            case 2: texture_index = 2; break; // 顶
+                            case 3: texture_index = 1; break; // 底
+                            default: texture_index = 3; break;// 侧
                             }
                             break;
+                        case 4: texture_index = 4; break; // !! 新增：水方块
                         }
 
                         u_offset = texture_index * tile_width;
-
-                        // --- 顶点和纹理坐标 ---
                         glm::vec3 block_pos_f = glm::vec3(block_pos);
                         Vertex v1 = { block_pos_f + face_vertices[i][0], { u_offset, 0.0f } };
                         Vertex v2 = { block_pos_f + face_vertices[i][1], { u_offset + tile_width, 0.0f } };
                         Vertex v3 = { block_pos_f + face_vertices[i][2], { u_offset + tile_width, 1.0f } };
                         Vertex v4 = { block_pos_f + face_vertices[i][3], { u_offset, 1.0f } };
-
                         vertices.push_back(v1); vertices.push_back(v2); vertices.push_back(v3);
                         vertices.push_back(v1); vertices.push_back(v3); vertices.push_back(v4);
                     }
@@ -671,24 +744,20 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk, const glm::ivec3& chunk_coords)
         }
     }
 
-    // --- VBO/VAO 更新 ---
+    // --- VBO/VAO 更新 (这部分代码无需改动) ---
     if (!chunk->vao.isCreated()) chunk->vao.create();
     chunk->vao.bind();
-
     if (!chunk->vbo.isCreated()) {
         chunk->vbo.create();
         chunk->vbo.setUsagePattern(QOpenGLBuffer::DynamicDraw);
     }
     chunk->vbo.bind();
     chunk->vbo.allocate(vertices.data(), vertices.size() * sizeof(Vertex));
-
     chunk->vertex_count = vertices.size();
-
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord));
-
     chunk->vao.release();
     doneCurrent();
 }

@@ -14,6 +14,7 @@
 #include <QSet>
 #include <vector>
 #include <unordered_map>
+#include "FastNoiseLite.h"
 
 // 使用 GLM 的哈希函数
 #define GLM_ENABLE_EXPERIMENTAL
@@ -74,6 +75,7 @@ private slots:
 private:
     // --- 世界管理 ---
     void generateWorld();
+    void generateChunk(Chunk* chunk, const glm::ivec3& chunk_coords);
     uint8_t getBlock(const glm::ivec3& world_pos);
     void setBlock(const glm::ivec3& world_pos, uint8_t block_id);
     glm::ivec3 worldToChunkCoords(const glm::ivec3& world_pos);
