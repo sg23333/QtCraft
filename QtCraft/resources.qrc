@@ -1,5 +1,0 @@
-<RCC>
-    <qresource prefix="/">
-        <file>texture_atlas.png</file>
-    </qresource>
-</RCC>
