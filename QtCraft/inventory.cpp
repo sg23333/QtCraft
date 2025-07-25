@@ -48,3 +48,7 @@ void Inventory::addItem(BlockType type, int count)
     }
     qWarning() << "Inventory is full!";
 }
+const InventoryItem& Inventory::getItem(int slotIndex) const
+{
+    return m_items[slotIndex];
+}

@@ -132,6 +132,8 @@ private:
     GLint m_ui_proj_matrix_location;
     GLint m_ui_model_matrix_location;
     GLint m_ui_color_location;
+    GLint m_ui_uv_offset_location;
+    GLint m_ui_uv_scale_location;
 
 
     // 准星

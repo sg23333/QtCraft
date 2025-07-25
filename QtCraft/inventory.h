@@ -16,7 +16,7 @@ class Inventory
 {
 public:
     Inventory();
-
+    const InventoryItem& getItem(int slotIndex) const;
     void nextSlot();
     void prevSlot();
     void setSlot(int slotIndex);

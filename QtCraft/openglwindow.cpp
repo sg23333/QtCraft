@@ -120,17 +120,19 @@ void OpenGLWindow::initShaders()
 
     m_crosshair_proj_matrix_location = m_crosshair_program.uniformLocation("proj_matrix");
 
-    // UI着色器
+    // --- 修改开始: 更新UI着色器以支持纹理图集 ---
     const char* ui_vsrc = R"(
         #version 330 core
         layout (location = 0) in vec2 aPos;
         layout (location = 1) in vec2 aTexCoord;
         uniform mat4 proj_matrix;
         uniform mat4 model_matrix;
+        uniform vec2 uv_offset;
+        uniform vec2 uv_scale;
         out vec2 TexCoord;
         void main() {
             gl_Position = proj_matrix * model_matrix * vec4(aPos, 0.0, 1.0);
-            TexCoord = aTexCoord;
+            TexCoord = aTexCoord * uv_scale + uv_offset;
         }
     )";
     const char* ui_fsrc = R"(
@@ -154,6 +156,9 @@ void OpenGLWindow::initShaders()
     m_ui_proj_matrix_location = m_ui_program.uniformLocation("proj_matrix");
     m_ui_model_matrix_location = m_ui_program.uniformLocation("model_matrix");
     m_ui_color_location = m_ui_program.uniformLocation("ourColor");
+    m_ui_uv_offset_location = m_ui_program.uniformLocation("uv_offset");
+    m_ui_uv_scale_location = m_ui_program.uniformLocation("uv_scale");
+    // --- 修改结束 ---
 }
 
 void OpenGLWindow::initTextures()
@@ -170,9 +175,24 @@ void OpenGLWindow::initTextures()
     m_texture_atlas->setMagnificationFilter(QOpenGLTexture::Nearest);
     m_texture_atlas->setWrapMode(QOpenGLTexture::Repeat);
 
-    // 注意: 您需要将 hotbar.png 和 hotbar_selector.png 添加到您的 .qrc 文件中
-    m_hotbar_texture = new QOpenGLTexture(QImage(":/hotbar.png").convertToFormat(QImage::Format_RGBA8888));
-    m_hotbar_selector_texture = new QOpenGLTexture(QImage(":/hotbar_selector.png").convertToFormat(QImage::Format_RGBA8888));
+    QImage hotbar_image(":/hotbar.png");
+    if (hotbar_image.isNull()) {
+        qWarning() << "错误：无法从资源加载 ':/hotbar.png'。请检查qrc文件和路径。";
+        qFatal("hotbar.png 纹理加载失败，程序终止。");
+    }
+    m_hotbar_texture = new QOpenGLTexture(hotbar_image.convertToFormat(QImage::Format_RGBA8888).mirrored());
+    m_hotbar_texture->setMagnificationFilter(QOpenGLTexture::Nearest);
+    m_hotbar_texture->setMinificationFilter(QOpenGLTexture::Nearest);
+
+
+    QImage selector_image(":/hotbar_selector.png");
+    if (selector_image.isNull()) {
+        qWarning() << "错误：无法从资源加载 ':/hotbar_selector.png'。请检查qrc文件和路径。";
+        qFatal("hotbar_selector.png 纹理加载失败，程序终止。");
+    }
+    m_hotbar_selector_texture = new QOpenGLTexture(selector_image.convertToFormat(QImage::Format_RGBA8888).mirrored());
+    m_hotbar_selector_texture->setMagnificationFilter(QOpenGLTexture::Nearest);
+    m_hotbar_selector_texture->setMinificationFilter(QOpenGLTexture::Nearest);
 }
 
 void OpenGLWindow::initCrosshair()
@@ -202,6 +222,7 @@ void OpenGLWindow::initCrosshair()
 
 void OpenGLWindow::initInventoryBar()
 {
+    // 这个顶点数据现在是通用的，可以被所有UI元素（物品栏、选择框、物品图标）复用
     float vertices[] = {
         // pos      // tex
         0.0f, 1.0f, 0.0f, 1.0f,
@@ -322,7 +343,6 @@ void OpenGLWindow::generateWorld() {
     }
     qDebug() << "生成了" << m_chunks.size() << "个区块。";
 
-    // 初始构建所有区块
     for(auto const& [coords, chunk] : m_chunks){
         chunk->needs_remeshing = true;
     }
@@ -346,7 +366,6 @@ void OpenGLWindow::updateGame()
     if (!m_ready_chunks.isEmpty()) {
         makeCurrent();
         for (Chunk* chunk : m_ready_chunks) {
-            // --- 不透明物体缓冲 ---
             if(chunk->mesh_data.size() > 0) {
                 if (!chunk->vao.isCreated()) chunk->vao.create();
                 chunk->vao.bind();
@@ -368,7 +387,6 @@ void OpenGLWindow::updateGame()
             chunk->mesh_data.clear();
             chunk->mesh_data.shrink_to_fit();
 
-            // --- 半透明物体缓冲 ---
             if(chunk->mesh_data_transparent.size() > 0) {
                 if (!chunk->vao_transparent.isCreated()) chunk->vao_transparent.create();
                 chunk->vao_transparent.bind();
@@ -437,7 +455,6 @@ void OpenGLWindow::paintGL()
     glm::mat4 vp = projection * view;
     glUniformMatrix4fv(m_vp_matrix_location, 1, GL_FALSE, glm::value_ptr(vp));
 
-    // --- 第一步：绘制所有不透明物体 ---
     glDepthMask(GL_TRUE);
     for (auto const& [coords, chunk_ptr] : m_chunks) {
         Chunk* chunk = chunk_ptr.get();
@@ -453,7 +470,6 @@ void OpenGLWindow::paintGL()
         }
     }
 
-    // --- 第二步：绘制所有半透明物体 ---
     std::map<float, Chunk*> sorted_transparent_chunks;
     for (auto const& [coords, chunk_ptr] : m_chunks) {
         Chunk* chunk = chunk_ptr.get();
@@ -464,7 +480,7 @@ void OpenGLWindow::paintGL()
         }
     }
 
-    glDepthMask(GL_FALSE); // 关闭深度写入
+    glDepthMask(GL_FALSE);
     for (auto it = sorted_transparent_chunks.rbegin(); it != sorted_transparent_chunks.rend(); ++it) {
         Chunk* chunk = it->second;
         glm::vec3 min_aabb = glm::vec3(chunk->coords * Chunk::CHUNK_SIZE);
@@ -478,17 +494,21 @@ void OpenGLWindow::paintGL()
             chunk->vao_transparent.release();
         }
     }
-    glDepthMask(GL_TRUE); // 恢复深度写入
+    glDepthMask(GL_TRUE);
 
     m_program.release();
 
 
     // --- 第三步：绘制2D UI ---
     glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE); // 为2D UI禁用面剔除
+
     m_ui_program.bind();
     glm::mat4 ui_projection = glm::ortho(0.0f, (float)width(), 0.0f, (float)height());
     glUniformMatrix4fv(m_ui_proj_matrix_location, 1, GL_FALSE, glm::value_ptr(ui_projection));
     glUniform4f(m_ui_color_location, 1.0f, 1.0f, 1.0f, 1.0f);
+    glUniform2f(m_ui_uv_offset_location, 0.0f, 0.0f); // 默认无偏移
+    glUniform2f(m_ui_uv_scale_location, 1.0f, 1.0f); // 默认无缩放
 
     m_ui_vao.bind();
 
@@ -504,7 +524,40 @@ void OpenGLWindow::paintGL()
     m_hotbar_texture->bind();
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
+    // --- 新增：绘制物品图标 ---
+    m_texture_atlas->bind(); // 物品图标来自纹理图集
+    float item_icon_size = 32.0f;
+    glUniform2f(m_ui_uv_scale_location, Texture::TileWidth, 1.0f);
+
+    for (int i = 0; i < INVENTORY_SLOTS; ++i) {
+        BlockType item_type = m_inventory.getItem(i).type;
+        if (item_type != BlockType::Air) {
+            int texture_index = 0;
+            switch (item_type) {
+            case BlockType::Stone: texture_index = Texture::Stone; break;
+            case BlockType::Dirt:  texture_index = Texture::Dirt;  break;
+            case BlockType::Grass: texture_index = Texture::GrassSide; break; // 使用侧面纹理
+            case BlockType::Water: texture_index = Texture::Water; break;
+            default: continue;
+            }
+            float u_offset = texture_index * Texture::TileWidth;
+            glUniform2f(m_ui_uv_offset_location, u_offset, 0.0f);
+
+            float item_x = hotbar_x + 6.0f + (i * 40.0f);
+            float item_y = hotbar_y + 6.0f;
+            glm::mat4 item_model = glm::mat4(1.0f);
+            item_model = glm::translate(item_model, glm::vec3(item_x, item_y, 0.0f));
+            item_model = glm::scale(item_model, glm::vec3(item_icon_size, item_icon_size, 1.0f));
+            glUniformMatrix4fv(m_ui_model_matrix_location, 1, GL_FALSE, glm::value_ptr(item_model));
+
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+    }
+
+
     // 绘制高亮选择框
+    glUniform2f(m_ui_uv_offset_location, 0.0f, 0.0f); // 重置UV变换
+    glUniform2f(m_ui_uv_scale_location, 1.0f, 1.0f);
     float selector_size = 48.0f;
     float selector_x = hotbar_x - 2.0f + (m_inventory.getSelectedSlot() * 40.0f);
     float selector_y = hotbar_y - 2.0f;
@@ -518,6 +571,7 @@ void OpenGLWindow::paintGL()
     m_ui_vao.release();
     m_ui_program.release();
 
+    glEnable(GL_CULL_FACE); // 为后续渲染恢复面剔除
 
     // 绘制准星
     m_crosshair_program.bind();
@@ -531,16 +585,12 @@ void OpenGLWindow::paintGL()
 
 void OpenGLWindow::processInput()
 {
-    // 这个函数现在只记录按键状态，不直接改变速度
-    // 速度的计算将移至 updatePhysics
 }
 
 void OpenGLWindow::updatePhysics(float deltaTime)
 {
-    // 垂直速度（重力）
     m_player_velocity.y += GRAVITY * deltaTime;
 
-    // 根据当前按键和摄像机朝向计算水平速度
     glm::vec3 inputVelocity(0.0f);
     glm::vec3 flat_front = glm::normalize(glm::vec3(m_camera.Front.x, 0.0f, m_camera.Front.z));
     glm::vec3 flat_right = glm::normalize(glm::cross(flat_front, glm::vec3(0.0,1.0,0.0)));
@@ -551,7 +601,6 @@ void OpenGLWindow::updatePhysics(float deltaTime)
     if (m_pressed_keys.contains(Qt::Key_A)) inputVelocity -= flat_right;
     if (m_pressed_keys.contains(Qt::Key_D)) inputVelocity += flat_right;
 
-    // 标准化输入速度并应用移动速度
     if (glm::length(inputVelocity) > 0.0f) {
         inputVelocity = glm::normalize(inputVelocity) * MOVE_SPEED;
     }
@@ -559,7 +608,6 @@ void OpenGLWindow::updatePhysics(float deltaTime)
     m_player_velocity.x = inputVelocity.x;
     m_player_velocity.z = inputVelocity.z;
 
-    // 使用最终的速度向量进行碰撞检测
     resolveCollisions(m_camera.Position, m_player_velocity * deltaTime);
 }
 
@@ -577,7 +625,6 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
     m_is_on_ground = false;
     AABB player_box;
 
-    // X-axis collision
     position.x += velocity.x;
     player_box = getPlayerAABB(position);
 
@@ -599,7 +646,6 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
         }
     }
 
-    // Z-axis collision
     position.z += velocity.z;
     player_box = getPlayerAABB(position);
 
@@ -621,7 +667,6 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
         }
     }
 
-    // Y-axis collision
     position.y += velocity.y;
     player_box = getPlayerAABB(position);
 
@@ -656,7 +701,6 @@ void OpenGLWindow::keyPressEvent(QKeyEvent *event)
         m_cursor_locked = false;
         setCursor(Qt::ArrowCursor);
     }
-    // 数字键选择物品栏
     if (event->key() >= Qt::Key_1 && event->key() <= Qt::Key_9) {
         m_inventory.setSlot(event->key() - Qt::Key_1);
     }
@@ -719,12 +763,12 @@ void OpenGLWindow::mouseMoveEvent(QMouseEvent *event)
 
 void OpenGLWindow::wheelEvent(QWheelEvent *event)
 {
-    if (event->angleDelta().y() > 0) { // 向上滚动
+    if (event->angleDelta().y() > 0) {
         m_inventory.prevSlot();
-    } else if (event->angleDelta().y() < 0) { // 向下滚动
+    } else if (event->angleDelta().y() < 0) {
         m_inventory.nextSlot();
     }
-    update(); // 请求重绘以更新选择框位置
+    update();
 }
 
 
@@ -849,11 +893,11 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
                     bool is_neighbor_transparent = (neighbor_id == BlockType::Water);
 
                     bool should_draw_face = false;
-                    if (block_id == BlockType::Water) { // 当前是水方块
-                        if (neighbor_id != BlockType::Water) { // 和非水方块相邻的面
+                    if (block_id == BlockType::Water) {
+                        if (neighbor_id != BlockType::Water) {
                             should_draw_face = true;
                         }
-                    } else { // 当前是不透明方块
+                    } else {
                         if (neighbor_id == BlockType::Air || is_neighbor_transparent) {
                             should_draw_face = true;
                         }
