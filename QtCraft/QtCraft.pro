@@ -14,6 +14,7 @@ SOURCES += \
 
 HEADERS += \
     FastNoiseLite.h \
+    block.h \
     openglwindow.h    # <-- 删除了 mainwindow.h
 
 # FORMS 整个部分都删除了，因为它只包含 mainwindow.ui

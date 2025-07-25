@@ -1,14 +1,14 @@
 #include "openglwindow.h"
+#include "block.h" // 引入新的头文件
 #include <QDebug>
 #include <QImage>
-#include <QTime>
 #include <QCursor>
 #include <glm/gtx/norm.hpp>
 #include <limits>
 #include <cstddef>
-#include <cmath> // For std::floor
+#include <cmath>
 
-// --- 玩家常量定义 ---
+// ... (常量定义) ...
 const float PLAYER_HEIGHT = 1.8f;
 const float PLAYER_WIDTH = 0.6f;
 const float PLAYER_EYE_LEVEL = 1.6f;
@@ -16,7 +16,6 @@ const float GRAVITY = -28.0f;
 const float JUMP_VELOCITY = 9.0f;
 const float MOVE_SPEED = 5.0f;
 
-// --- 区块实现 ---
 Chunk::Chunk() {
     memset(blocks, 0, sizeof(blocks));
 }
@@ -26,19 +25,16 @@ Chunk::~Chunk() {
     if (vao.isCreated()) vao.destroy();
 }
 
-// --- OpenGLWindow 实现 ---
 OpenGLWindow::OpenGLWindow(QWidget *parent)
     : QOpenGLWidget(parent)
 {
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
-
-    // 连接 QFutureWatcher 的信号，以便在任务完成时得到通知
-    // 在这个实现中，我们采用轮询检查的方式，但保留连接以备未来扩展
     connect(&m_mesh_builder_watcher, &QFutureWatcher<void>::finished, this, &OpenGLWindow::handleChunkMeshReady);
-
     connect(&m_timer, &QTimer::timeout, this, &OpenGLWindow::updateGame);
-    m_timer.start(16); // 约 60 FPS
+    m_timer.start(16);
+
+    m_elapsed_timer.start(); // <-- 启动计时器
 
     updateCameraVectors();
 }
@@ -58,6 +54,7 @@ OpenGLWindow::~OpenGLWindow()
     doneCurrent();
 }
 
+// ... (initShaders, initTextures, initCrosshair 函数不变) ...
 void OpenGLWindow::initShaders()
 {
     // 主场景着色器
@@ -163,17 +160,13 @@ void OpenGLWindow::initCrosshair()
     m_crosshair_vbo.release();
 }
 
-
 void OpenGLWindow::initializeGL()
 {
     initializeOpenGLFunctions();
-
     initShaders();
     initTextures();
     initCrosshair();
-
     generateWorld();
-
     glClearColor(0.39f, 0.58f, 0.93f, 1.0f);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -181,6 +174,7 @@ void OpenGLWindow::initializeGL()
 
 void OpenGLWindow::generateChunk(Chunk* chunk, const glm::ivec3& chunk_coords)
 {
+    // ... (FastNoiseLite setup remains the same) ...
     FastNoiseLite noise;
     noise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
 
@@ -197,6 +191,7 @@ void OpenGLWindow::generateChunk(Chunk* chunk, const glm::ivec3& chunk_coords)
 
     for (int x = 0; x < Chunk::CHUNK_SIZE; ++x) {
         for (int z = 0; z < Chunk::CHUNK_SIZE; ++z) {
+            // ... (noise calculation remains the same) ...
             int world_x = chunk_coords.x * Chunk::CHUNK_SIZE + x;
             int world_z = chunk_coords.z * Chunk::CHUNK_SIZE + z;
 
@@ -215,28 +210,27 @@ void OpenGLWindow::generateChunk(Chunk* chunk, const glm::ivec3& chunk_coords)
                 amplitude *= persistence;
                 frequency *= lacunarity;
             }
-
             int sea_level = 8;
             int terrain_height = static_cast<int>(total_noise) + sea_level;
 
             for (int y = 0; y < Chunk::CHUNK_SIZE; ++y) {
                 int world_y = chunk_coords.y * Chunk::CHUNK_SIZE + y;
 
+                BlockType blockToPlace = BlockType::Air; // 默认为空气
                 if (world_y > terrain_height) {
                     if (world_y <= sea_level) {
-                        chunk->blocks[x][y][z] = 4; // 水
-                    } else {
-                        chunk->blocks[x][y][z] = 0; // 空气
+                        blockToPlace = BlockType::Water; // 水
                     }
                 } else {
                     if (world_y == terrain_height && world_y > sea_level) {
-                        chunk->blocks[x][y][z] = 3; // 草
+                        blockToPlace = BlockType::Grass; // 草
                     } else if (world_y > terrain_height - 5) {
-                        chunk->blocks[x][y][z] = 2; // 泥土
+                        blockToPlace = BlockType::Dirt; // 泥土
                     } else {
-                        chunk->blocks[x][y][z] = 1; // 石头
+                        blockToPlace = BlockType::Stone; // 石头
                     }
                 }
+                chunk->blocks[x][y][z] = static_cast<uint8_t>(blockToPlace);
             }
         }
     }
@@ -244,7 +238,7 @@ void OpenGLWindow::generateChunk(Chunk* chunk, const glm::ivec3& chunk_coords)
 
 
 void OpenGLWindow::generateWorld() {
-    int world_size_in_chunks = 12;
+    int world_size_in_chunks = 24;
     int world_height_in_chunks = 8;
 
     for (int x = -world_size_in_chunks / 2; x < world_size_in_chunks / 2; ++x) {
@@ -268,26 +262,19 @@ void OpenGLWindow::resizeGL(int w, int h)
     glViewport(0, 0, w, h);
 }
 
-// ===================================================================
-// ===== 核心改动点: updateGame() 函数 =====
-// ===================================================================
 void OpenGLWindow::updateGame()
 {
-    // --- 1. 计算时间差 ---
-    float currentFrame = QTime::currentTime().msecsSinceStartOfDay() / 1000.0f;
-    if (m_last_frame == 0.0f) m_last_frame = currentFrame;
-    m_delta_time = currentFrame - m_last_frame;
-    m_last_frame = currentFrame;
+    // --- 1. 使用 QElapsedTimer 计算时间差 ---
+    float delta_time = m_elapsed_timer.restart() / 1000.0f;
 
     // --- 2. 处理输入和物理 ---
     processInput();
-    updatePhysics(m_delta_time);
+    updatePhysics(delta_time);
 
     // --- 3. (主线程) 检查并上传已就绪的区块网格 ---
-    // 加锁以安全地访问待处理列表
     m_ready_chunks_mutex.lock();
     if (!m_ready_chunks.isEmpty()) {
-        makeCurrent(); // 准备进行GL操作
+        makeCurrent();
         for (Chunk* chunk : m_ready_chunks) {
             if (!chunk->vao.isCreated()) chunk->vao.create();
             chunk->vao.bind();
@@ -300,15 +287,14 @@ void OpenGLWindow::updateGame()
             chunk->vbo.allocate(chunk->mesh_data.data(), chunk->mesh_data.size() * sizeof(Vertex));
             chunk->vertex_count = chunk->mesh_data.size();
 
-            // 设置顶点属性指针
             glEnableVertexAttribArray(0);
             glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
             glEnableVertexAttribArray(1);
             glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord));
 
             chunk->vao.release();
-            chunk->is_building = false; // 解锁，允许再次构建
-            chunk->mesh_data.clear();   // 清理临时数据，释放内存
+            chunk->is_building = false;
+            chunk->mesh_data.clear();
             chunk->mesh_data.shrink_to_fit();
         }
         doneCurrent();
@@ -316,35 +302,27 @@ void OpenGLWindow::updateGame()
     }
     m_ready_chunks_mutex.unlock();
 
-
     // --- 4. (主线程) 启动新的区块网格构建任务 ---
     for (auto const& [coords, chunk] : m_chunks) {
         if (chunk->needs_remeshing && !chunk->is_building) {
-            chunk->is_building = true;      // 加锁，防止重复提交
+            chunk->is_building = true;
             chunk->needs_remeshing = false;
-            chunk->coords = coords;         // 确保区块知道自己的坐标
-
-            // 使用 QtConcurrent::run 在后台线程池中运行 buildChunkMesh
+            chunk->coords = coords;
             QtConcurrent::run(this, &OpenGLWindow::buildChunkMesh, chunk);
         }
     }
 
     // --- 5. 请求重绘 ---
-    update(); // 触发 paintGL()
+    update();
 }
 
-// 在这个实现中，此槽函数是空的，因为我们直接在 buildChunkMesh 的末尾
-// 将结果添加到待处理列表中。保留它是为了将来可能的扩展。
-void OpenGLWindow::handleChunkMeshReady()
-{
-}
+void OpenGLWindow::handleChunkMeshReady() {}
 
 
 void OpenGLWindow::paintGL()
 {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // --- 1. 绘制3D世界 ---
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -361,7 +339,7 @@ void OpenGLWindow::paintGL()
     glUniformMatrix4fv(m_vp_matrix_location, 1, GL_FALSE, glm::value_ptr(vp));
 
     for (auto const& [coords, chunk] : m_chunks) {
-        if (chunk->vertex_count > 0 && chunk->vao.isCreated()) { // 增加 vao.isCreated() 检查
+        if (chunk->vertex_count > 0 && chunk->vao.isCreated()) {
             glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(coords * Chunk::CHUNK_SIZE));
             glUniformMatrix4fv(m_model_matrix_location, 1, GL_FALSE, glm::value_ptr(model));
             chunk->vao.bind();
@@ -371,8 +349,6 @@ void OpenGLWindow::paintGL()
     }
     m_program.release();
 
-
-    // --- 2. 绘制2D准星 ---
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
 
@@ -388,6 +364,7 @@ void OpenGLWindow::paintGL()
 }
 
 
+// ... (processInput, updatePhysics, AABB, resolveCollisions 等函数基本不变) ...
 void OpenGLWindow::processInput()
 {
     m_player_velocity.x = 0.0f;
@@ -434,7 +411,7 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
     for (int y = floor(player_box.min.y); y <= floor(player_box.max.y); ++y) {
         for (int x = floor(player_box.min.x); x <= floor(player_box.max.x); ++x) {
             for (int z = floor(player_box.min.z); z <= floor(player_box.max.z); ++z) {
-                if (getBlock({x, y, z}) != 0) {
+                if (getBlock({x, y, z}) != static_cast<uint8_t>(BlockType::Air)) {
                     AABB block_box = {glm::vec3(x, y, z), glm::vec3(x + 1, y + 1, z + 1)};
                     if (player_box.max.x > block_box.min.x && player_box.min.x < block_box.max.x &&
                         player_box.max.y > block_box.min.y && player_box.min.y < block_box.max.y &&
@@ -461,7 +438,7 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
     for (int x = floor(player_box.min.x); x <= floor(player_box.max.x); ++x) {
         for (int y = floor(player_box.min.y); y <= floor(player_box.max.y); ++y) {
             for (int z = floor(player_box.min.z); z <= floor(player_box.max.z); ++z) {
-                if (getBlock({x, y, z}) != 0) {
+                if (getBlock({x, y, z}) != static_cast<uint8_t>(BlockType::Air)) {
                     AABB block_box = {glm::vec3(x, y, z), glm::vec3(x + 1, y + 1, z + 1)};
                     if (player_box.max.x > block_box.min.x && player_box.min.x < block_box.max.x &&
                         player_box.max.y > block_box.min.y && player_box.min.y < block_box.max.y &&
@@ -484,7 +461,7 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
     for (int z = floor(player_box.min.z); z <= floor(player_box.max.z); ++z) {
         for (int x = floor(player_box.min.x); x <= floor(player_box.max.x); ++x) {
             for (int y = floor(player_box.min.y); y <= floor(player_box.max.y); ++y) {
-                if (getBlock({x, y, z}) != 0) {
+                if (getBlock({x, y, z}) != static_cast<uint8_t>(BlockType::Air)) {
                     AABB block_box = {glm::vec3(x, y, z), glm::vec3(x + 1, y + 1, z + 1)};
                     if (player_box.max.x > block_box.min.x && player_box.min.x < block_box.max.x &&
                         player_box.max.y > block_box.min.y && player_box.min.y < block_box.max.y &&
@@ -508,9 +485,10 @@ void OpenGLWindow::keyPressEvent(QKeyEvent *event)
         m_cursor_locked = false;
         setCursor(Qt::ArrowCursor);
     }
-    if (event->key() == Qt::Key_1) m_current_block_id = 1; // 原石
-    if (event->key() == Qt::Key_2) m_current_block_id = 2; // 泥土
-    if (event->key() == Qt::Key_3) m_current_block_id = 3; // 草方块
+    // 使用 BlockType 枚举来设置当前方块
+    if (event->key() == Qt::Key_1) m_current_block_id = BlockType::Stone;
+    if (event->key() == Qt::Key_2) m_current_block_id = BlockType::Dirt;
+    if (event->key() == Qt::Key_3) m_current_block_id = BlockType::Grass;
 
     if (event->key() == Qt::Key_Space && m_is_on_ground) {
         m_player_velocity.y = JUMP_VELOCITY;
@@ -520,6 +498,7 @@ void OpenGLWindow::keyPressEvent(QKeyEvent *event)
     if (!event->isAutoRepeat()) m_pressed_keys.insert(event->key());
 }
 
+// ... (keyReleaseEvent, mousePressEvent, mouseMoveEvent, updateCameraVectors) ...
 void OpenGLWindow::keyReleaseEvent(QKeyEvent *event)
 {
     if (!event->isAutoRepeat()) m_pressed_keys.remove(event->key());
@@ -537,8 +516,8 @@ void OpenGLWindow::mousePressEvent(QMouseEvent *event)
 
     glm::ivec3 hit_block, adjacent_block;
     if (raycast(hit_block, adjacent_block)) {
-        if (event->button() == Qt::LeftButton) setBlock(hit_block, 0);
-        else if (event->button() == Qt::RightButton) setBlock(adjacent_block, m_current_block_id);
+        if (event->button() == Qt::LeftButton) setBlock(hit_block, BlockType::Air); // 破坏方块
+        else if (event->button() == Qt::RightButton) setBlock(adjacent_block, m_current_block_id); // 放置方块
     }
 }
 
@@ -580,20 +559,18 @@ void OpenGLWindow::updateCameraVectors()
     m_camera_front = glm::normalize(front);
 }
 
-
 uint8_t OpenGLWindow::getBlock(const glm::ivec3& world_pos) {
     glm::ivec3 chunk_coords = worldToChunkCoords(world_pos);
     auto it = m_chunks.find(chunk_coords);
-    if (it == m_chunks.end()) return 0; // 如果区块不存在，视作空气
+    if (it == m_chunks.end()) return static_cast<uint8_t>(BlockType::Air);
 
     Chunk* chunk = it->second;
     glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
     return chunk->blocks[local_pos.x][local_pos.y][local_pos.z];
 }
 
-void OpenGLWindow::setBlock(const glm::ivec3& world_pos, uint8_t block_id) {
+void OpenGLWindow::setBlock(const glm::ivec3& world_pos, BlockType block_id) {
     glm::ivec3 chunk_coords = worldToChunkCoords(world_pos);
-
     auto it = m_chunks.find(chunk_coords);
     if (it == m_chunks.end()) {
         qDebug() << "无法在不存在的区块中放置方块。";
@@ -603,10 +580,10 @@ void OpenGLWindow::setBlock(const glm::ivec3& world_pos, uint8_t block_id) {
     Chunk* chunk = it->second;
     glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
 
-    chunk->blocks[local_pos.x][local_pos.y][local_pos.z] = block_id;
+    chunk->blocks[local_pos.x][local_pos.y][local_pos.z] = static_cast<uint8_t>(block_id);
     chunk->needs_remeshing = true;
 
-    // 检查并触发相邻区块的网格更新
+    // ... (trigger neighbor remesh logic remains the same) ...
     auto trigger_neighbor_remesh = [&](const glm::ivec3& offset) {
         glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(world_pos + offset);
         if (neighbor_chunk_coords != chunk_coords) {
@@ -625,7 +602,6 @@ void OpenGLWindow::setBlock(const glm::ivec3& world_pos, uint8_t block_id) {
     if (local_pos.z == Chunk::CHUNK_SIZE - 1) trigger_neighbor_remesh({0, 0, 1});
 }
 
-
 glm::ivec3 OpenGLWindow::worldToChunkCoords(const glm::ivec3& world_pos) {
     return {
         (int)floor(world_pos.x / (float)Chunk::CHUNK_SIZE),
@@ -634,6 +610,7 @@ glm::ivec3 OpenGLWindow::worldToChunkCoords(const glm::ivec3& world_pos) {
     };
 }
 
+// ... (raycast function is unchanged) ...
 bool OpenGLWindow::raycast(glm::ivec3 &hit_block, glm::ivec3 &adjacent_block)
 {
     glm::vec3 ray_origin = m_camera_pos + glm::vec3(0.0f, PLAYER_EYE_LEVEL, 0.0f);
@@ -662,7 +639,7 @@ bool OpenGLWindow::raycast(glm::ivec3 &hit_block, glm::ivec3 &adjacent_block)
             else { current_pos.z += step.z; t_max.z += t_delta.z; }
         }
 
-        if (getBlock(current_pos) != 0) {
+        if (getBlock(current_pos) != static_cast<uint8_t>(BlockType::Air)) {
             hit_block = current_pos;
             adjacent_block = last_pos;
             return true;
@@ -671,14 +648,8 @@ bool OpenGLWindow::raycast(glm::ivec3 &hit_block, glm::ivec3 &adjacent_block)
     return false;
 }
 
-// ===================================================================
-// ===== 核心改动点: buildChunkMesh() 函数 (后台线程执行) =====
-// ===================================================================
 void OpenGLWindow::buildChunkMesh(Chunk* chunk)
 {
-    // 这个函数在后台线程执行，因此不能进行任何OpenGL调用。
-    // 它只计算顶点数据，并将结果存储在 chunk->mesh_data 中。
-
     std::vector<Vertex> vertices;
     const glm::ivec3& chunk_coords = chunk->coords;
 
@@ -694,10 +665,10 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
     for (int x = 0; x < Chunk::CHUNK_SIZE; ++x) {
         for (int y = 0; y < Chunk::CHUNK_SIZE; ++y) {
             for (int z = 0; z < Chunk::CHUNK_SIZE; ++z) {
-                uint8_t block_id = chunk->blocks[x][y][z];
-                if (block_id == 0) continue;
+                BlockType block_id = static_cast<BlockType>(chunk->blocks[x][y][z]);
+                if (block_id == BlockType::Air) continue;
 
-                bool is_current_block_transparent = (block_id == 4);
+                bool is_current_block_transparent = (block_id == BlockType::Water);
                 glm::ivec3 block_pos(x, y, z);
                 const glm::ivec3 neighbors[6] = {
                     {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}
@@ -705,39 +676,38 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
 
                 for (int i = 0; i < 6; ++i) {
                     glm::ivec3 neighbor_world_pos = chunk_coords * Chunk::CHUNK_SIZE + block_pos + neighbors[i];
-                    uint8_t neighbor_id = getBlock(neighbor_world_pos);
+                    BlockType neighbor_id = static_cast<BlockType>(getBlock(neighbor_world_pos));
 
                     bool should_draw_face = false;
                     if (is_current_block_transparent) {
                         if (neighbor_id != block_id) should_draw_face = true;
                     } else {
-                        if (neighbor_id == 0 || neighbor_id == 4) should_draw_face = true;
+                        if (neighbor_id == BlockType::Air || neighbor_id == BlockType::Water) {
+                            should_draw_face = true;
+                        }
                     }
 
                     if (should_draw_face) {
-                        float atlas_width = 5.0f;
-                        float tile_width = 1.0f / atlas_width;
-                        float u_offset = 0.0f;
                         int texture_index = 0;
-
                         switch (block_id) {
-                        case 1: texture_index = 0; break; // 原石
-                        case 2: texture_index = 1; break; // 泥土
-                        case 3: // 草方块
+                        case BlockType::Stone: texture_index = Texture::Stone; break;
+                        case BlockType::Dirt:  texture_index = Texture::Dirt;  break;
+                        case BlockType::Grass:
                             switch (i) {
-                            case 2: texture_index = 2; break; // 顶
-                            case 3: texture_index = 1; break; // 底
-                            default: texture_index = 3; break;// 侧
+                            case 2:  texture_index = Texture::GrassTop; break; // 顶
+                            case 3:  texture_index = Texture::Dirt;     break; // 底
+                            default: texture_index = Texture::GrassSide;break; // 侧
                             }
                             break;
-                        case 4: texture_index = 4; break; // 水
+                        case BlockType::Water: texture_index = Texture::Water; break;
+                        default: continue; // 未知方块不渲染
                         }
 
-                        u_offset = texture_index * tile_width;
+                        float u_offset = texture_index * Texture::TileWidth;
                         glm::vec3 block_pos_f = glm::vec3(block_pos);
                         Vertex v1 = { block_pos_f + face_vertices[i][0], { u_offset, 0.0f } };
-                        Vertex v2 = { block_pos_f + face_vertices[i][1], { u_offset + tile_width, 0.0f } };
-                        Vertex v3 = { block_pos_f + face_vertices[i][2], { u_offset + tile_width, 1.0f } };
+                        Vertex v2 = { block_pos_f + face_vertices[i][1], { u_offset + Texture::TileWidth, 0.0f } };
+                        Vertex v3 = { block_pos_f + face_vertices[i][2], { u_offset + Texture::TileWidth, 1.0f } };
                         Vertex v4 = { block_pos_f + face_vertices[i][3], { u_offset, 1.0f } };
                         vertices.push_back(v1); vertices.push_back(v2); vertices.push_back(v3);
                         vertices.push_back(v1); vertices.push_back(v3); vertices.push_back(v4);
@@ -747,10 +717,7 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
         }
     }
 
-    // --- 计算完成后，将结果存储到 chunk 的临时变量中 ---
     chunk->mesh_data = std::move(vertices);
-
-    // --- 将准备好的 chunk 添加到待上传列表中 (需要加锁) ---
     m_ready_chunks_mutex.lock();
     m_ready_chunks.append(chunk);
     m_ready_chunks_mutex.unlock();
