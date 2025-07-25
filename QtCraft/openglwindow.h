@@ -14,6 +14,14 @@
 #include <QSet>
 #include <vector>
 #include <unordered_map>
+
+// --- 新增的头文件 ---
+#include <QtConcurrent/QtConcurrent>
+#include <QFuture>
+#include <QFutureWatcher>
+#include <QMutex>
+#include <QList>
+
 #include "FastNoiseLite.h"
 
 // 使用 GLM 的哈希函数
@@ -40,6 +48,11 @@ public:
     int vertex_count = 0;
     uint8_t blocks[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE] = {{{0}}};
     bool needs_remeshing = true;
+
+    // --- 新增状态和数据成员 ---
+    bool is_building = false;           // 状态锁，防止重复提交构建任务
+    glm::ivec3 coords;                  // 存储自身的区块坐标
+    std::vector<Vertex> mesh_data;      // 存储后台线程计算好的网格数据
 };
 
 // --- 玩家包围盒定义 ---
@@ -71,6 +84,9 @@ protected:
 private slots:
     // --- 主游戏循环 ---
     void updateGame();
+    // --- 新增槽函数，用于处理网格构建完成的信号 (虽然在此实现中我们不直接用它) ---
+    void handleChunkMeshReady();
+
 
 private:
     // --- 世界管理 ---
@@ -80,8 +96,8 @@ private:
     void setBlock(const glm::ivec3& world_pos, uint8_t block_id);
     glm::ivec3 worldToChunkCoords(const glm::ivec3& world_pos);
 
-    // --- 网格构建 ---
-    void buildChunkMesh(Chunk* chunk, const glm::ivec3& chunk_coords);
+    // --- 网格构建 (现在在后台线程运行) ---
+    void buildChunkMesh(Chunk* chunk);
 
     // --- 输入与物理 ---
     void processInput();
@@ -136,9 +152,12 @@ private:
     // --- 状态标志 ---
     bool m_cursor_locked = false;
     bool m_just_locked_cursor = false;
-    // --- 方块ID定义 ---
-    // 0: 空气, 1: 原石, 2: 泥土, 3: 草方块
     uint8_t m_current_block_id = 1;
+
+    // --- 新增：多线程相关成员 ---
+    QFutureWatcher<void> m_mesh_builder_watcher;
+    QMutex m_ready_chunks_mutex;   // 互斥锁，保护 m_ready_chunks
+    QList<Chunk*> m_ready_chunks;  // 存储已完成网格构建、待上传到GPU的区块
 };
 
 #endif // OPENGLWINDOW_H
