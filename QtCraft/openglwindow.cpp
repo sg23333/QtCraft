@@ -3,7 +3,6 @@
 #include <QImage>
 #include <QTime>
 #include <QCursor>
-#include <QPainter>
 #include <glm/gtx/norm.hpp>
 #include <limits>
 #include <cstddef>
@@ -47,13 +46,16 @@ OpenGLWindow::~OpenGLWindow()
     }
     m_chunks.clear();
     delete m_texture_atlas;
+
+    if (m_crosshair_vbo.isCreated()) m_crosshair_vbo.destroy();
+    if (m_crosshair_vao.isCreated()) m_crosshair_vao.destroy();
+
     doneCurrent();
 }
 
-void OpenGLWindow::initializeGL()
+void OpenGLWindow::initShaders()
 {
-    initializeOpenGLFunctions();
-
+    // 主场景着色器
     const char *vsrc = R"(
         #version 330 core
         layout (location = 0) in vec3 aPos;
@@ -80,9 +82,9 @@ void OpenGLWindow::initializeGL()
         }
     )";
 
-    if (!m_program.addShaderFromSourceCode(QOpenGLShader::Vertex, vsrc)) qFatal("顶点着色器编译失败");
-    if (!m_program.addShaderFromSourceCode(QOpenGLShader::Fragment, fsrc)) qFatal("片段着色器编译失败");
-    if (!m_program.link()) qFatal("着色器程序链接失败");
+    if (!m_program.addShaderFromSourceCode(QOpenGLShader::Vertex, vsrc)) qFatal("主顶点着色器编译失败");
+    if (!m_program.addShaderFromSourceCode(QOpenGLShader::Fragment, fsrc)) qFatal("主片段着色器编译失败");
+    if (!m_program.link()) qFatal("主着色器程序链接失败");
 
     m_program.bind();
     m_program.setUniformValue("texture_atlas", 0);
@@ -91,6 +93,32 @@ void OpenGLWindow::initializeGL()
     m_vp_matrix_location = m_program.uniformLocation("vp_matrix");
     m_model_matrix_location = m_program.uniformLocation("model_matrix");
 
+    // 准星着色器
+    const char* crosshair_vsrc = R"(
+        #version 330 core
+        layout (location = 0) in vec2 aPos;
+        uniform mat4 proj_matrix;
+        void main() {
+            gl_Position = proj_matrix * vec4(aPos, 0.0, 1.0);
+        }
+    )";
+    const char* crosshair_fsrc = R"(
+        #version 330 core
+        out vec4 FragColor;
+        void main() {
+            FragColor = vec4(1.0, 1.0, 1.0, 1.0); // 白色
+        }
+    )";
+
+    if (!m_crosshair_program.addShaderFromSourceCode(QOpenGLShader::Vertex, crosshair_vsrc)) qFatal("准星顶点着色器编译失败");
+    if (!m_crosshair_program.addShaderFromSourceCode(QOpenGLShader::Fragment, crosshair_fsrc)) qFatal("准星片段着色器编译失败");
+    if (!m_crosshair_program.link()) qFatal("准星着色器程序链接失败");
+
+    m_crosshair_proj_matrix_location = m_crosshair_program.uniformLocation("proj_matrix");
+}
+
+void OpenGLWindow::initTextures()
+{
     QImage image(":/texture_atlas.png");
     if (image.isNull()) {
         qWarning() << "错误：无法从资源加载纹理图集 ':/texture_atlas.png'。";
@@ -103,6 +131,41 @@ void OpenGLWindow::initializeGL()
     m_texture_atlas->setMinificationFilter(QOpenGLTexture::Nearest);
     m_texture_atlas->setMagnificationFilter(QOpenGLTexture::Nearest);
     m_texture_atlas->setWrapMode(QOpenGLTexture::Repeat);
+}
+
+void OpenGLWindow::initCrosshair()
+{
+    float vertices[] = {
+        // 水平线
+        -10.0f, 0.0f,
+        10.0f, 0.0f,
+        // 垂直线
+        0.0f, -10.0f,
+        0.0f,  10.0f
+    };
+
+    m_crosshair_vao.create();
+    m_crosshair_vao.bind();
+
+    m_crosshair_vbo.create();
+    m_crosshair_vbo.bind();
+    m_crosshair_vbo.allocate(vertices, sizeof(vertices));
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+
+    m_crosshair_vao.release();
+    m_crosshair_vbo.release();
+}
+
+
+void OpenGLWindow::initializeGL()
+{
+    initializeOpenGLFunctions();
+
+    initShaders();
+    initTextures();
+    initCrosshair();
 
     generateWorld();
 
@@ -111,6 +174,7 @@ void OpenGLWindow::initializeGL()
     glEnable(GL_CULL_FACE);
 }
 
+// --- 改动点: 更新世界生成 ---
 void OpenGLWindow::generateWorld() {
     int world_size = 4;
     for (int x = 0; x < world_size; ++x) {
@@ -121,8 +185,9 @@ void OpenGLWindow::generateWorld() {
 
             for (int bx = 0; bx < Chunk::CHUNK_SIZE; ++bx) {
                 for (int bz = 0; bz < Chunk::CHUNK_SIZE; ++bz) {
-                    new_chunk->blocks[bx][0][bz] = 2;
-                    new_chunk->blocks[bx][1][bz] = 1;
+                    new_chunk->blocks[bx][0][bz] = 1; // 最底层为石头
+                    new_chunk->blocks[bx][1][bz] = 2; // 中间层为泥土
+                    new_chunk->blocks[bx][2][bz] = 3; // 最上层为草方块
                 }
             }
         }
@@ -161,6 +226,8 @@ void OpenGLWindow::paintGL()
 {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    // --- 1. 绘制3D世界 ---
+    glEnable(GL_DEPTH_TEST);
     m_program.bind();
     glActiveTexture(GL_TEXTURE0);
     m_texture_atlas->bind();
@@ -180,9 +247,25 @@ void OpenGLWindow::paintGL()
             glDrawArrays(GL_TRIANGLES, 0, chunk->vertex_count);
         }
     }
-
     m_program.release();
+
+
+    // --- 2. 绘制2D准星 (使用OpenGL) ---
+    glDisable(GL_DEPTH_TEST);
+    m_crosshair_program.bind();
+
+    float w = width();
+    float h = height();
+    glm::mat4 proj = glm::ortho(-w/2.0f, w/2.0f, -h/2.0f, h/2.0f, -1.0f, 1.0f);
+    glUniformMatrix4fv(m_crosshair_proj_matrix_location, 1, GL_FALSE, glm::value_ptr(proj));
+
+    m_crosshair_vao.bind();
+    glDrawArrays(GL_LINES, 0, 4);
+    m_crosshair_vao.release();
+
+    m_crosshair_program.release();
 }
+
 
 void OpenGLWindow::processInput()
 {
@@ -227,12 +310,11 @@ AABB OpenGLWindow::getPlayerAABB(const glm::vec3& position) const
     };
 }
 
-// [修改] 重新排序碰撞检测逻辑，优先处理Y轴
 void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& velocity)
 {
     m_is_on_ground = false;
 
-    // --- 1. Y轴碰撞 ---
+    // Y-axis collision
     position.y += velocity.y;
     AABB player_box = getPlayerAABB(position);
 
@@ -241,26 +323,25 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
             for (int z = floor(player_box.min.z); z <= floor(player_box.max.z); ++z) {
                 if (getBlock({x, y, z}) != 0) {
                     AABB block_box = {glm::vec3(x, y, z), glm::vec3(x + 1, y + 1, z + 1)};
-                    // 确认AABB真的重叠
                     if (player_box.max.x > block_box.min.x && player_box.min.x < block_box.max.x &&
                         player_box.max.y > block_box.min.y && player_box.min.y < block_box.max.y &&
                         player_box.max.z > block_box.min.z && player_box.min.z < block_box.max.z)
                     {
-                        if (velocity.y > 0) { // 向上移动撞到天花板
+                        if (velocity.y > 0) {
                             position.y = block_box.min.y - PLAYER_HEIGHT - 0.0001f;
-                        } else if (velocity.y < 0) { // 向下移动撞到地板
+                        } else if (velocity.y < 0) {
                             position.y = block_box.max.y;
                             m_is_on_ground = true;
                         }
                         m_player_velocity.y = 0;
-                        player_box = getPlayerAABB(position); // 解决碰撞后立即更新包围盒
+                        player_box = getPlayerAABB(position);
                     }
                 }
             }
         }
     }
 
-    // --- 2. X轴碰撞 ---
+    // X-axis collision
     position.x += velocity.x;
     player_box = getPlayerAABB(position);
 
@@ -273,9 +354,9 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
                         player_box.max.y > block_box.min.y && player_box.min.y < block_box.max.y &&
                         player_box.max.z > block_box.min.z && player_box.min.z < block_box.max.z)
                     {
-                        if (velocity.x > 0) { // 向右移动
+                        if (velocity.x > 0) {
                             position.x = block_box.min.x - (PLAYER_WIDTH / 2.0f) - 0.0001f;
-                        } else if (velocity.x < 0) { // 向左移动
+                        } else if (velocity.x < 0) {
                             position.x = block_box.max.x + (PLAYER_WIDTH / 2.0f) + 0.0001f;
                         }
                         m_player_velocity.x = 0;
@@ -286,7 +367,7 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
         }
     }
 
-    // --- 3. Z轴碰撞 ---
+    // Z-axis collision
     position.z += velocity.z;
     player_box = getPlayerAABB(position);
 
@@ -299,9 +380,9 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
                         player_box.max.y > block_box.min.y && player_box.min.y < block_box.max.y &&
                         player_box.max.z > block_box.min.z && player_box.min.z < block_box.max.z)
                     {
-                        if (velocity.z > 0) { // 向前移动
+                        if (velocity.z > 0) {
                             position.z = block_box.min.z - (PLAYER_WIDTH / 2.0f) - 0.0001f;
-                        } else if (velocity.z < 0) { // 向后移动
+                        } else if (velocity.z < 0) {
                             position.z = block_box.max.z + (PLAYER_WIDTH / 2.0f) + 0.0001f;
                         }
                         m_player_velocity.z = 0;
@@ -313,15 +394,16 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
     }
 }
 
-
+// --- 改动点: 增加按键'3'选择草方块 ---
 void OpenGLWindow::keyPressEvent(QKeyEvent *event)
 {
     if (event->key() == Qt::Key_Escape) {
         m_cursor_locked = false;
         setCursor(Qt::ArrowCursor);
     }
-    if (event->key() == Qt::Key_1) m_current_block_id = 1;
-    if (event->key() == Qt::Key_2) m_current_block_id = 2;
+    if (event->key() == Qt::Key_1) m_current_block_id = 1; // 原石
+    if (event->key() == Qt::Key_2) m_current_block_id = 2; // 泥土
+    if (event->key() == Qt::Key_3) m_current_block_id = 3; // 草方块
 
     if (event->key() == Qt::Key_Space && m_is_on_ground) {
         m_player_velocity.y = JUMP_VELOCITY;
@@ -426,35 +508,29 @@ void OpenGLWindow::setBlock(const glm::ivec3& world_pos, uint8_t block_id) {
     chunk->blocks[local_pos.x][local_pos.y][local_pos.z] = block_id;
     chunk->needs_remeshing = true;
 
-    glm::ivec3 neighbor_world_pos;
+    // Trigger remeshing for adjacent chunks if block is on a chunk border
     if (local_pos.x == 0) {
-        neighbor_world_pos = world_pos + glm::ivec3(-1, 0, 0);
-        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(neighbor_world_pos);
+        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(world_pos + glm::ivec3(-1, 0, 0));
         if(m_chunks.count(neighbor_chunk_coords)) m_chunks.at(neighbor_chunk_coords)->needs_remeshing = true;
     }
     if (local_pos.x == Chunk::CHUNK_SIZE - 1) {
-        neighbor_world_pos = world_pos + glm::ivec3(1, 0, 0);
-        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(neighbor_world_pos);
+        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(world_pos + glm::ivec3(1, 0, 0));
         if(m_chunks.count(neighbor_chunk_coords)) m_chunks.at(neighbor_chunk_coords)->needs_remeshing = true;
     }
     if (local_pos.y == 0) {
-        neighbor_world_pos = world_pos + glm::ivec3(0, -1, 0);
-        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(neighbor_world_pos);
+        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(world_pos + glm::ivec3(0, -1, 0));
         if(m_chunks.count(neighbor_chunk_coords)) m_chunks.at(neighbor_chunk_coords)->needs_remeshing = true;
     }
     if (local_pos.y == Chunk::CHUNK_SIZE - 1) {
-        neighbor_world_pos = world_pos + glm::ivec3(0, 1, 0);
-        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(neighbor_world_pos);
+        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(world_pos + glm::ivec3(0, 1, 0));
         if(m_chunks.count(neighbor_chunk_coords)) m_chunks.at(neighbor_chunk_coords)->needs_remeshing = true;
     }
     if (local_pos.z == 0) {
-        neighbor_world_pos = world_pos + glm::ivec3(0, 0, -1);
-        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(neighbor_world_pos);
+        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(world_pos + glm::ivec3(0, 0, -1));
         if(m_chunks.count(neighbor_chunk_coords)) m_chunks.at(neighbor_chunk_coords)->needs_remeshing = true;
     }
     if (local_pos.z == Chunk::CHUNK_SIZE - 1) {
-        neighbor_world_pos = world_pos + glm::ivec3(0, 0, 1);
-        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(neighbor_world_pos);
+        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(world_pos + glm::ivec3(0, 0, 1));
         if(m_chunks.count(neighbor_chunk_coords)) m_chunks.at(neighbor_chunk_coords)->needs_remeshing = true;
     }
 }
@@ -511,6 +587,9 @@ bool OpenGLWindow::raycast(glm::ivec3 &hit_block, glm::ivec3 &adjacent_block)
     return false;
 }
 
+// ===================================================================
+// ===== 核心改动点：buildChunkMesh 函数中的纹理坐标计算 =====
+// ===================================================================
 void OpenGLWindow::buildChunkMesh(Chunk* chunk, const glm::ivec3& chunk_coords)
 {
     makeCurrent();
@@ -518,12 +597,12 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk, const glm::ivec3& chunk_coords)
     std::vector<Vertex> vertices;
 
     const glm::vec3 face_vertices[6][4] = {
-        { {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1} },
-        { {1, 0, 0}, {0, 0, 0}, {0, 1, 0}, {1, 1, 0} },
-        { {0, 1, 1}, {1, 1, 1}, {1, 1, 0}, {0, 1, 0} },
-        { {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1} },
-        { {1, 0, 1}, {1, 0, 0}, {1, 1, 0}, {1, 1, 1} },
-        { {0, 0, 0}, {0, 0, 1}, {0, 1, 1}, {0, 1, 0} }
+        { {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1} }, // Front (+z)
+        { {1, 0, 0}, {0, 0, 0}, {0, 1, 0}, {1, 1, 0} }, // Back (-z)
+        { {0, 1, 1}, {1, 1, 1}, {1, 1, 0}, {0, 1, 0} }, // Top (+y)
+        { {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1} }, // Bottom (-y)
+        { {1, 0, 1}, {1, 0, 0}, {1, 1, 0}, {1, 1, 1} }, // Right (+x)
+        { {0, 0, 0}, {0, 0, 1}, {0, 1, 1}, {0, 1, 0} }  // Left (-x)
     };
 
     for (int x = 0; x < Chunk::CHUNK_SIZE; ++x) {
@@ -539,39 +618,60 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk, const glm::ivec3& chunk_coords)
                     { 0, -1,  0}, { 1,  0,  0}, {-1,  0,  0}
                 };
 
-                for (int i = 0; i < 6; ++i) {
+                for (int i = 0; i < 6; ++i) { // i是面的索引: 0-前, 1-后, 2-上, 3-下, 4-右, 5-左
                     glm::ivec3 neighbor_pos = block_pos + neighbors[i];
                     glm::ivec3 neighbor_world_pos = chunk_coords * Chunk::CHUNK_SIZE + neighbor_pos;
 
                     if (getBlock(neighbor_world_pos) == 0) {
-                        glm::vec3 block_pos_f = glm::vec3(block_pos);
 
-                        Vertex v1 = { block_pos_f + face_vertices[i][0], {0.0f, 0.0f} };
-                        Vertex v2 = { block_pos_f + face_vertices[i][1], {1.0f, 0.0f} };
-                        Vertex v3 = { block_pos_f + face_vertices[i][2], {1.0f, 1.0f} };
-                        Vertex v4 = { block_pos_f + face_vertices[i][3], {0.0f, 1.0f} };
-
-                        float atlas_width = 2.0f;
-                        float u_offset = (block_id - 1) / atlas_width;
+                        // --- 核心纹理选择逻辑 ---
+                        // 假设图集有4个纹理：0=原石, 1=泥土, 2=草顶, 3=草侧
+                        float atlas_width = 4.0f; // 更新图集宽度
                         float tile_width = 1.0f / atlas_width;
+                        float u_offset = 0.0f;
 
-                        v1.texCoord = { u_offset, 0.0f };
-                        v2.texCoord = { u_offset + tile_width, 0.0f };
-                        v3.texCoord = { u_offset + tile_width, 1.0f };
-                        v4.texCoord = { u_offset, 1.0f };
+                        int texture_index = 0;
 
-                        vertices.push_back(v1);
-                        vertices.push_back(v2);
-                        vertices.push_back(v3);
-                        vertices.push_back(v1);
-                        vertices.push_back(v3);
-                        vertices.push_back(v4);
+                        switch (block_id) {
+                        case 1: // 原石
+                            texture_index = 0; // 所有面都使用原石纹理
+                            break;
+                        case 2: // 泥土
+                            texture_index = 1; // 所有面都使用泥土纹理
+                            break;
+                        case 3: // 草方块
+                            switch (i) {
+                            case 2: // 顶面 (+y)
+                                texture_index = 2; // 草顶纹理
+                                break;
+                            case 3: // 底面 (-y)
+                                texture_index = 1; // 泥土纹理
+                                break;
+                            default: // 所有侧面
+                                texture_index = 3; // 草侧纹理
+                                break;
+                            }
+                            break;
+                        }
+
+                        u_offset = texture_index * tile_width;
+
+                        // --- 顶点和纹理坐标 ---
+                        glm::vec3 block_pos_f = glm::vec3(block_pos);
+                        Vertex v1 = { block_pos_f + face_vertices[i][0], { u_offset, 0.0f } };
+                        Vertex v2 = { block_pos_f + face_vertices[i][1], { u_offset + tile_width, 0.0f } };
+                        Vertex v3 = { block_pos_f + face_vertices[i][2], { u_offset + tile_width, 1.0f } };
+                        Vertex v4 = { block_pos_f + face_vertices[i][3], { u_offset, 1.0f } };
+
+                        vertices.push_back(v1); vertices.push_back(v2); vertices.push_back(v3);
+                        vertices.push_back(v1); vertices.push_back(v3); vertices.push_back(v4);
                     }
                 }
             }
         }
     }
 
+    // --- VBO/VAO 更新 ---
     if (!chunk->vao.isCreated()) chunk->vao.create();
     chunk->vao.bind();
 

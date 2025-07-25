@@ -91,6 +91,11 @@ private:
     // --- 交互 ---
     bool raycast(glm::ivec3& hit_block, glm::ivec3& adjacent_block);
 
+    // --- 初始化辅助函数 ---
+    void initShaders();
+    void initTextures();
+    void initCrosshair();
+
     // --- 渲染 ---
     QOpenGLShaderProgram m_program;
     QOpenGLTexture *m_texture_atlas = nullptr;
@@ -98,6 +103,13 @@ private:
     GLint m_vp_matrix_location;
     GLint m_model_matrix_location;
     QTimer m_timer;
+
+    // --- 准星渲染资源 ---
+    QOpenGLVertexArrayObject m_crosshair_vao;
+    QOpenGLBuffer m_crosshair_vbo;
+    QOpenGLShaderProgram m_crosshair_program;
+    GLint m_crosshair_proj_matrix_location;
+
 
     // --- 相机/玩家属性 ---
     glm::vec3 m_camera_pos   = glm::vec3(8.0f, 25.0f, 8.0f);
@@ -122,7 +134,9 @@ private:
     // --- 状态标志 ---
     bool m_cursor_locked = false;
     bool m_just_locked_cursor = false;
-    uint8_t m_current_block_id = 1; // 0: 空气, 1: 原石, 2: 泥土
+    // --- 方块ID定义 ---
+    // 0: 空气, 1: 原石, 2: 泥土, 3: 草方块
+    uint8_t m_current_block_id = 1;
 };
 
 #endif // OPENGLWINDOW_H
