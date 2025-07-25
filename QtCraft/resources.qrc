@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/">
+        <file>texture_atlas.png</file>
+        <file>hotbar.png</file>
+        <file>hotbar_selector.png</file>
+    </qresource>
+</RCC>
