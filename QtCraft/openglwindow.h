@@ -115,6 +115,7 @@ private:
     void initTextures();
     void initCrosshair();
     void initInventoryBar();
+    void initOverlay(); // 新增初始化函数
 
     QOpenGLShaderProgram m_program;
     QOpenGLTexture *m_texture_atlas = nullptr;
@@ -142,10 +143,20 @@ private:
     QOpenGLShaderProgram m_crosshair_program;
     GLint m_crosshair_proj_matrix_location;
 
+    // 水下效果专用资源
+    QOpenGLVertexArrayObject m_overlay_vao;
+    QOpenGLBuffer m_overlay_vbo;
+    QOpenGLShaderProgram m_overlay_program;
+    GLint m_overlay_color_location;
+
+
     Camera m_camera;
     Inventory m_inventory;
     glm::vec3 m_player_velocity = glm::vec3(0.0f);
     bool m_is_on_ground = false;
+
+    // 新增状态
+    bool m_is_in_water = false;
 
     QSet<int> m_pressed_keys;
 

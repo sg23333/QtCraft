@@ -17,6 +17,12 @@ const float GRAVITY = -28.0f;
 const float JUMP_VELOCITY = 9.0f;
 const float MOVE_SPEED = 5.0f;
 
+// 新的水中物理常量
+const float WATER_GRAVITY = -6.0f;
+const float SWIM_VELOCITY = 3.0f;
+const float WATER_MOVE_SPEED_MULTIPLIER = 0.6f;
+const float MAX_SINK_SPEED = -4.0f;
+
 Chunk::Chunk() {
     memset(blocks, 0, sizeof(blocks));
 }
@@ -48,11 +54,13 @@ OpenGLWindow::~OpenGLWindow()
     delete m_hotbar_texture;
     delete m_hotbar_selector_texture;
 
-
     if (m_crosshair_vbo.isCreated()) m_crosshair_vbo.destroy();
     if (m_crosshair_vao.isCreated()) m_crosshair_vao.destroy();
     if (m_ui_vbo.isCreated()) m_ui_vbo.destroy();
     if (m_ui_vao.isCreated()) m_ui_vao.destroy();
+    if (m_overlay_vbo.isCreated()) m_overlay_vbo.destroy();
+    if (m_overlay_vao.isCreated()) m_overlay_vao.destroy();
+
 
     doneCurrent();
 }
@@ -120,7 +128,7 @@ void OpenGLWindow::initShaders()
 
     m_crosshair_proj_matrix_location = m_crosshair_program.uniformLocation("proj_matrix");
 
-    // --- 修改开始: 更新UI着色器以支持纹理图集 ---
+    // UI着色器
     const char* ui_vsrc = R"(
         #version 330 core
         layout (location = 0) in vec2 aPos;
@@ -158,7 +166,29 @@ void OpenGLWindow::initShaders()
     m_ui_color_location = m_ui_program.uniformLocation("ourColor");
     m_ui_uv_offset_location = m_ui_program.uniformLocation("uv_offset");
     m_ui_uv_scale_location = m_ui_program.uniformLocation("uv_scale");
-    // --- 修改结束 ---
+
+    // --- 新增：初始化水下效果叠加层着色器 ---
+    const char* overlay_vsrc = R"(
+        #version 330 core
+        layout (location = 0) in vec2 aPos;
+        void main() {
+            gl_Position = vec4(aPos.x, aPos.y, 0.0, 1.0);
+        }
+    )";
+    const char* overlay_fsrc = R"(
+        #version 330 core
+        out vec4 FragColor;
+        uniform vec4 overlay_color;
+        void main() {
+            FragColor = overlay_color;
+        }
+    )";
+
+    if (!m_overlay_program.addShaderFromSourceCode(QOpenGLShader::Vertex, overlay_vsrc)) qFatal("叠加层顶点着色器编译失败");
+    if (!m_overlay_program.addShaderFromSourceCode(QOpenGLShader::Fragment, overlay_fsrc)) qFatal("叠加层片段着色器编译失败");
+    if (!m_overlay_program.link()) qFatal("叠加层着色器程序链接失败");
+
+    m_overlay_color_location = m_overlay_program.uniformLocation("overlay_color");
 }
 
 void OpenGLWindow::initTextures()
@@ -222,7 +252,6 @@ void OpenGLWindow::initCrosshair()
 
 void OpenGLWindow::initInventoryBar()
 {
-    // 这个顶点数据现在是通用的，可以被所有UI元素（物品栏、选择框、物品图标）复用
     float vertices[] = {
         // pos      // tex
         0.0f, 1.0f, 0.0f, 1.0f,
@@ -250,6 +279,32 @@ void OpenGLWindow::initInventoryBar()
     m_ui_vbo.release();
 }
 
+void OpenGLWindow::initOverlay() {
+    float vertices[] = {
+        // 三角形 1
+        -1.0f, -1.0f,
+        1.0f, -1.0f,
+        1.0f,  1.0f,
+        // 三角形 2
+        1.0f,  1.0f,
+        -1.0f,  1.0f,
+        -1.0f, -1.0f
+    };
+
+    m_overlay_vao.create();
+    m_overlay_vao.bind();
+
+    m_overlay_vbo.create();
+    m_overlay_vbo.bind();
+    m_overlay_vbo.allocate(vertices, sizeof(vertices));
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+
+    m_overlay_vao.release();
+    m_overlay_vbo.release();
+}
+
 void OpenGLWindow::initializeGL()
 {
     initializeOpenGLFunctions();
@@ -257,6 +312,7 @@ void OpenGLWindow::initializeGL()
     initTextures();
     initCrosshair();
     initInventoryBar();
+    initOverlay(); // 调用新的初始化函数
     generateWorld();
     glClearColor(0.39f, 0.58f, 0.93f, 1.0f);
     glEnable(GL_DEPTH_TEST);
@@ -499,16 +555,16 @@ void OpenGLWindow::paintGL()
     m_program.release();
 
 
-    // --- 第三步：绘制2D UI ---
+    // --- 绘制2D UI ---
     glDisable(GL_DEPTH_TEST);
-    glDisable(GL_CULL_FACE); // 为2D UI禁用面剔除
+    glDisable(GL_CULL_FACE);
 
     m_ui_program.bind();
     glm::mat4 ui_projection = glm::ortho(0.0f, (float)width(), 0.0f, (float)height());
     glUniformMatrix4fv(m_ui_proj_matrix_location, 1, GL_FALSE, glm::value_ptr(ui_projection));
     glUniform4f(m_ui_color_location, 1.0f, 1.0f, 1.0f, 1.0f);
-    glUniform2f(m_ui_uv_offset_location, 0.0f, 0.0f); // 默认无偏移
-    glUniform2f(m_ui_uv_scale_location, 1.0f, 1.0f); // 默认无缩放
+    glUniform2f(m_ui_uv_offset_location, 0.0f, 0.0f);
+    glUniform2f(m_ui_uv_scale_location, 1.0f, 1.0f);
 
     m_ui_vao.bind();
 
@@ -524,8 +580,8 @@ void OpenGLWindow::paintGL()
     m_hotbar_texture->bind();
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    // --- 新增：绘制物品图标 ---
-    m_texture_atlas->bind(); // 物品图标来自纹理图集
+    // 绘制物品图标
+    m_texture_atlas->bind();
     float item_icon_size = 32.0f;
     glUniform2f(m_ui_uv_scale_location, Texture::TileWidth, 1.0f);
 
@@ -536,7 +592,7 @@ void OpenGLWindow::paintGL()
             switch (item_type) {
             case BlockType::Stone: texture_index = Texture::Stone; break;
             case BlockType::Dirt:  texture_index = Texture::Dirt;  break;
-            case BlockType::Grass: texture_index = Texture::GrassSide; break; // 使用侧面纹理
+            case BlockType::Grass: texture_index = Texture::GrassSide; break;
             case BlockType::Water: texture_index = Texture::Water; break;
             default: continue;
             }
@@ -556,7 +612,7 @@ void OpenGLWindow::paintGL()
 
 
     // 绘制高亮选择框
-    glUniform2f(m_ui_uv_offset_location, 0.0f, 0.0f); // 重置UV变换
+    glUniform2f(m_ui_uv_offset_location, 0.0f, 0.0f);
     glUniform2f(m_ui_uv_scale_location, 1.0f, 1.0f);
     float selector_size = 48.0f;
     float selector_x = hotbar_x - 2.0f + (m_inventory.getSelectedSlot() * 40.0f);
@@ -571,7 +627,7 @@ void OpenGLWindow::paintGL()
     m_ui_vao.release();
     m_ui_program.release();
 
-    glEnable(GL_CULL_FACE); // 为后续渲染恢复面剔除
+    glEnable(GL_CULL_FACE);
 
     // 绘制准星
     m_crosshair_program.bind();
@@ -581,6 +637,21 @@ void OpenGLWindow::paintGL()
     glDrawArrays(GL_LINES, 0, 4);
     m_crosshair_vao.release();
     m_crosshair_program.release();
+
+    // --- 使用独立的叠加层着色器绘制水下效果 ---
+    if (m_is_in_water) {
+        glDisable(GL_DEPTH_TEST);
+        // Blend func 仍然是 GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
+        // 它对于半透明颜色是正确的
+
+        m_overlay_program.bind();
+        m_overlay_program.setUniformValue(m_overlay_color_location, QVector4D(0.1f, 0.4f, 0.8f, 0.4f));
+
+        m_overlay_vao.bind();
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        m_overlay_vao.release();
+        m_overlay_program.release();
+    }
 }
 
 void OpenGLWindow::processInput()
@@ -589,8 +660,12 @@ void OpenGLWindow::processInput()
 
 void OpenGLWindow::updatePhysics(float deltaTime)
 {
-    m_player_velocity.y += GRAVITY * deltaTime;
+    // --- 1. 判断玩家环境 ---
+    glm::ivec3 player_head_pos = glm::floor(m_camera.Position + glm::vec3(0.0f, PLAYER_EYE_LEVEL, 0.0f));
+    BlockType block_at_head = static_cast<BlockType>(getBlock(player_head_pos));
+    m_is_in_water = (block_at_head == BlockType::Water);
 
+    // --- 2. 获取玩家输入 ---
     glm::vec3 inputVelocity(0.0f);
     glm::vec3 flat_front = glm::normalize(glm::vec3(m_camera.Front.x, 0.0f, m_camera.Front.z));
     glm::vec3 flat_right = glm::normalize(glm::cross(flat_front, glm::vec3(0.0,1.0,0.0)));
@@ -601,10 +676,48 @@ void OpenGLWindow::updatePhysics(float deltaTime)
     if (m_pressed_keys.contains(Qt::Key_A)) inputVelocity -= flat_right;
     if (m_pressed_keys.contains(Qt::Key_D)) inputVelocity += flat_right;
 
-    if (glm::length(inputVelocity) > 0.0f) {
-        inputVelocity = glm::normalize(inputVelocity) * MOVE_SPEED;
+    // --- 3. 根据环境应用物理规则 ---
+    if (m_is_in_water) {
+        // --- 水中物理 ---
+        m_is_on_ground = false; // 在水中不能算作“在地面上”
+
+        // 应用较弱的重力（浮力效果）
+        m_player_velocity.y += WATER_GRAVITY * deltaTime;
+
+        // 按住空格键时上浮
+        if (m_pressed_keys.contains(Qt::Key_Space)) {
+            m_player_velocity.y = SWIM_VELOCITY;
+        }
+
+        // 限制最大下沉速度
+        if (m_player_velocity.y < MAX_SINK_SPEED) {
+            m_player_velocity.y = MAX_SINK_SPEED;
+        }
+
+        // 减慢水平移动速度
+        if (glm::length(inputVelocity) > 0.0f) {
+            inputVelocity = glm::normalize(inputVelocity) * MOVE_SPEED * WATER_MOVE_SPEED_MULTIPLIER;
+        }
+
+    } else {
+        // --- 陆地/空中物理 ---
+
+        // 应用正常重力
+        m_player_velocity.y += GRAVITY * deltaTime;
+
+        // 在地面上时才能跳跃
+        if (m_pressed_keys.contains(Qt::Key_Space) && m_is_on_ground) {
+            m_player_velocity.y = JUMP_VELOCITY;
+            m_is_on_ground = false;
+        }
+
+        // 正常水平移动速度
+        if (glm::length(inputVelocity) > 0.0f) {
+            inputVelocity = glm::normalize(inputVelocity) * MOVE_SPEED;
+        }
     }
 
+    // --- 4. 应用最终速度并进行碰撞检测 ---
     m_player_velocity.x = inputVelocity.x;
     m_player_velocity.z = inputVelocity.z;
 
@@ -631,7 +744,8 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
     for (int y = floor(player_box.min.y); y <= floor(player_box.max.y); ++y) {
         for (int x = floor(player_box.min.x); x <= floor(player_box.max.x); ++x) {
             for (int z = floor(player_box.min.z); z <= floor(player_box.max.z); ++z) {
-                if (getBlock({x, y, z}) != static_cast<uint8_t>(BlockType::Air)) {
+                BlockType block_type = static_cast<BlockType>(getBlock({x, y, z}));
+                if (block_type != BlockType::Air && block_type != BlockType::Water) {
                     AABB block_box = {glm::vec3(x, y, z), glm::vec3(x + 1, y + 1, z + 1)};
                     if (player_box.max.x > block_box.min.x && player_box.min.x < block_box.max.x &&
                         player_box.max.y > block_box.min.y && player_box.min.y < block_box.max.y &&
@@ -652,7 +766,8 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
     for (int y = floor(player_box.min.y); y <= floor(player_box.max.y); ++y) {
         for (int x = floor(player_box.min.x); x <= floor(player_box.max.x); ++x) {
             for (int z = floor(player_box.min.z); z <= floor(player_box.max.z); ++z) {
-                if (getBlock({x, y, z}) != static_cast<uint8_t>(BlockType::Air)) {
+                BlockType block_type = static_cast<BlockType>(getBlock({x, y, z}));
+                if (block_type != BlockType::Air && block_type != BlockType::Water) {
                     AABB block_box = {glm::vec3(x, y, z), glm::vec3(x + 1, y + 1, z + 1)};
                     if (player_box.max.x > block_box.min.x && player_box.min.x < block_box.max.x &&
                         player_box.max.y > block_box.min.y && player_box.min.y < block_box.max.y &&
@@ -673,7 +788,8 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
     for (int y = floor(player_box.min.y); y <= floor(player_box.max.y); ++y) {
         for (int x = floor(player_box.min.x); x <= floor(player_box.max.x); ++x) {
             for (int z = floor(player_box.min.z); z <= floor(player_box.max.z); ++z) {
-                if (getBlock({x, y, z}) != static_cast<uint8_t>(BlockType::Air)) {
+                BlockType block_type = static_cast<BlockType>(getBlock({x, y, z}));
+                if (block_type != BlockType::Air && block_type != BlockType::Water) {
                     AABB block_box = {glm::vec3(x, y, z), glm::vec3(x + 1, y + 1, z + 1)};
                     if (player_box.max.x > block_box.min.x && player_box.min.x < block_box.max.x &&
                         player_box.max.y > block_box.min.y && player_box.min.y < block_box.max.y &&
@@ -703,11 +819,6 @@ void OpenGLWindow::keyPressEvent(QKeyEvent *event)
     }
     if (event->key() >= Qt::Key_1 && event->key() <= Qt::Key_9) {
         m_inventory.setSlot(event->key() - Qt::Key_1);
-    }
-
-    if (event->key() == Qt::Key_Space && m_is_on_ground) {
-        m_player_velocity.y = JUMP_VELOCITY;
-        m_is_on_ground = false;
     }
 
     if (!event->isAutoRepeat()) m_pressed_keys.insert(event->key());
@@ -921,17 +1032,32 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
 
                         float u_offset = texture_index * Texture::TileWidth;
                         glm::vec3 block_pos_f = glm::vec3(block_pos);
-                        Vertex v1 = { block_pos_f + face_vertices[i][0], { u_offset, 0.0f } };
-                        Vertex v2 = { block_pos_f + face_vertices[i][1], { u_offset + Texture::TileWidth, 0.0f } };
-                        Vertex v3 = { block_pos_f + face_vertices[i][2], { u_offset + Texture::TileWidth, 1.0f } };
-                        Vertex v4 = { block_pos_f + face_vertices[i][3], { u_offset, 1.0f } };
+
+                        Vertex v[4];
+                        v[0] = { block_pos_f + face_vertices[i][0], { u_offset, 0.0f } };
+                        v[1] = { block_pos_f + face_vertices[i][1], { u_offset + Texture::TileWidth, 0.0f } };
+                        v[2] = { block_pos_f + face_vertices[i][2], { u_offset + Texture::TileWidth, 1.0f } };
+                        v[3] = { block_pos_f + face_vertices[i][3], { u_offset, 1.0f } };
 
                         if (block_id == BlockType::Water) {
-                            vertices_transparent.push_back(v1); vertices_transparent.push_back(v2); vertices_transparent.push_back(v3);
-                            vertices_transparent.push_back(v1); vertices_transparent.push_back(v3); vertices_transparent.push_back(v4);
+                            glm::ivec3 pos_above = chunk_coords * Chunk::CHUNK_SIZE + block_pos + glm::ivec3(0, 1, 0);
+                            BlockType block_above = static_cast<BlockType>(getBlock(pos_above));
+
+                            if (block_above == BlockType::Air) {
+                                for(int k = 0; k < 4; ++k) {
+                                    if(face_vertices[i][k].y == 1.0f) {
+                                        v[k].position.y -= 0.2f;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (block_id == BlockType::Water) {
+                            vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[1]); vertices_transparent.push_back(v[2]);
+                            vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[2]); vertices_transparent.push_back(v[3]);
                         } else {
-                            vertices_opaque.push_back(v1); vertices_opaque.push_back(v2); vertices_opaque.push_back(v3);
-                            vertices_opaque.push_back(v1); vertices_opaque.push_back(v3); vertices_opaque.push_back(v4);
+                            vertices_opaque.push_back(v[0]); vertices_opaque.push_back(v[1]); vertices_opaque.push_back(v[2]);
+                            vertices_opaque.push_back(v[0]); vertices_opaque.push_back(v[2]); vertices_opaque.push_back(v[3]);
                         }
                     }
                 }
