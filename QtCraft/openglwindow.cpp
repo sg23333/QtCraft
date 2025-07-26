@@ -461,7 +461,7 @@ void OpenGLWindow::paintGL()
         glm::vec3 min_aabb = glm::vec3(coords * Chunk::CHUNK_SIZE);
         glm::vec3 max_aabb = min_aabb + glm::vec3(Chunk::CHUNK_SIZE);
 
-        if (chunk->vertex_count > 0 && chunk->vao.isCreated() && m_camera.IsBoxInFrustum(min_aabb, max_aabb)) {
+        if (chunk->vertex_count > 0 && chunk->vao.isCreated()&& m_camera.IsBoxInFrustum(min_aabb, max_aabb)) {
             glm::mat4 model = glm::translate(glm::mat4(1.0f), glm::vec3(coords * Chunk::CHUNK_SIZE));
             glUniformMatrix4fv(m_model_matrix_location, 1, GL_FALSE, glm::value_ptr(model));
             chunk->vao.bind();
@@ -470,13 +470,13 @@ void OpenGLWindow::paintGL()
         }
     }
 
-    std::map<float, Chunk*> sorted_transparent_chunks;
+    std::multimap<float, Chunk*> sorted_transparent_chunks;
     for (auto const& [coords, chunk_ptr] : m_chunks) {
         Chunk* chunk = chunk_ptr.get();
         if (chunk->vertex_count_transparent > 0) {
             glm::vec3 chunk_center = glm::vec3(chunk->coords * Chunk::CHUNK_SIZE) + glm::vec3(Chunk::CHUNK_SIZE / 2.0f);
             float dist = glm::distance2(m_camera.Position, chunk_center);
-            sorted_transparent_chunks[dist] = chunk;
+            sorted_transparent_chunks.insert({dist, chunk});
         }
     }
 
