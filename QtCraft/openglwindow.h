@@ -41,6 +41,7 @@
 struct Vertex {
     glm::vec3 position;
     glm::vec2 texCoord;
+    float lightLevel; // 新增：光照等级
 };
 
 // --- 区块定义 ---
@@ -63,11 +64,22 @@ public:
     std::vector<Vertex> mesh_data_transparent;
 
     uint8_t blocks[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE] = {{{0}}};
+    // 新增：光照数据数组
+    // 每个字节存储两个4位的光照等级：高4位是天空光，低4位是方块光
+    uint8_t lightmap[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE] = {{{0}}};
     bool needs_remeshing = true;
 
     // --- 新增状态和数据成员 ---
     bool is_building = false;
     glm::ivec3 coords;
+
+    // 新增：光照相关函数
+    uint8_t getLight(const glm::ivec3& pos) const;
+    void setLight(const glm::ivec3& pos, uint8_t light);
+    uint8_t getSkyLight(const glm::ivec3& pos) const;
+    void setSkyLight(const glm::ivec3& pos, uint8_t light);
+    uint8_t getBlockLight(const glm::ivec3& pos) const;
+    void setBlockLight(const glm::ivec3& pos, uint8_t light);
 };
 
 // --- 玩家包围盒定义 ---
@@ -105,6 +117,12 @@ private:
     uint8_t getBlock(const glm::ivec3& world_pos);
     void setBlock(const glm::ivec3& world_pos, BlockType block_id);
     glm::ivec3 worldToChunkCoords(const glm::ivec3& world_pos);
+
+    // --- 新增：光照相关函数 ---
+    uint8_t getLight(const glm::ivec3& world_pos);
+    void setLight(const glm::ivec3& world_pos, uint8_t light);
+    void propagateLight();
+
     void buildChunkMesh(Chunk* chunk);
     void processInput();
     void updatePhysics(float deltaTime);
