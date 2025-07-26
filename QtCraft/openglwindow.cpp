@@ -554,8 +554,23 @@ void OpenGLWindow::paintGL()
 
     m_program.release();
 
+    // --- 【已修改】先绘制水下效果叠加层 ---
+    if (m_is_in_water) {
+        glDisable(GL_DEPTH_TEST);
+        // Blend func 仍然是 GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
+        // 它对于半透明颜色是正确的
 
-    // --- 绘制2D UI ---
+        m_overlay_program.bind();
+        m_overlay_program.setUniformValue(m_overlay_color_location, QVector4D(0.1f, 0.4f, 0.8f, 0.4f));
+
+        m_overlay_vao.bind();
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        m_overlay_vao.release();
+        m_overlay_program.release();
+    }
+
+
+    // --- 接着绘制2D UI ---
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
 
@@ -629,7 +644,7 @@ void OpenGLWindow::paintGL()
 
     glEnable(GL_CULL_FACE);
 
-    // 绘制准星
+    // --- 最后绘制准星 ---
     m_crosshair_program.bind();
     glm::mat4 crosshair_proj = glm::ortho(-width()/2.0f, width()/2.0f, -height()/2.0f, height()/2.0f, -1.0f, 1.0f);
     glUniformMatrix4fv(m_crosshair_proj_matrix_location, 1, GL_FALSE, glm::value_ptr(crosshair_proj));
@@ -637,21 +652,6 @@ void OpenGLWindow::paintGL()
     glDrawArrays(GL_LINES, 0, 4);
     m_crosshair_vao.release();
     m_crosshair_program.release();
-
-    // --- 使用独立的叠加层着色器绘制水下效果 ---
-    if (m_is_in_water) {
-        glDisable(GL_DEPTH_TEST);
-        // Blend func 仍然是 GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
-        // 它对于半透明颜色是正确的
-
-        m_overlay_program.bind();
-        m_overlay_program.setUniformValue(m_overlay_color_location, QVector4D(0.1f, 0.4f, 0.8f, 0.4f));
-
-        m_overlay_vao.bind();
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        m_overlay_vao.release();
-        m_overlay_program.release();
-    }
 }
 
 void OpenGLWindow::processInput()
@@ -1055,6 +1055,12 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
                         if (block_id == BlockType::Water) {
                             vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[1]); vertices_transparent.push_back(v[2]);
                             vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[2]); vertices_transparent.push_back(v[3]);
+
+                            // 如果是顶面(i=2)，则额外添加一个反向的背面，使其在水下可见
+                            if (i == 2) {
+                                vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[2]); vertices_transparent.push_back(v[1]);
+                                vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[3]); vertices_transparent.push_back(v[2]);
+                            }
                         } else {
                             vertices_opaque.push_back(v[0]); vertices_opaque.push_back(v[1]); vertices_opaque.push_back(v[2]);
                             vertices_opaque.push_back(v[0]); vertices_opaque.push_back(v[2]); vertices_opaque.push_back(v[3]);
