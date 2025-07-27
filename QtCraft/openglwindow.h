@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <memory>
 #include <map>
+#include <queue> // 新增
 
 // --- 新增的头文件 ---
 #include <QtConcurrent/QtConcurrent>
@@ -30,18 +31,13 @@
 #include "block.h"
 #include "inventory.h"
 
+
 // 使用 GLM 的哈希函数
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/hash.hpp>
-
-// --- 顶点定义 ---
-struct Vertex {
-    glm::vec3 position;
-    glm::vec2 texCoord;
-};
 
 // --- 区块定义 ---
 class Chunk {
@@ -63,6 +59,7 @@ public:
     std::vector<Vertex> mesh_data_transparent;
 
     uint8_t blocks[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE] = {{{0}}};
+    uint8_t lighting[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE] = {{{0}}}; // 新增：光照数据
     bool needs_remeshing = true;
 
     // --- 新增状态和数据成员 ---
@@ -100,6 +97,10 @@ private slots:
     void handleChunkMeshReady();
 
 private:
+    // --- 光照更新队列 ---
+    std::queue<std::pair<glm::ivec3, int>> m_light_propagation_queue;
+    std::queue<std::pair<glm::ivec3, int>> m_light_removal_queue;
+
     void generateWorld();
     void generateChunk(Chunk* chunk, const glm::ivec3& chunk_coords);
     uint8_t getBlock(const glm::ivec3& world_pos);
@@ -112,6 +113,15 @@ private:
     AABB getPlayerAABB(const glm::vec3& position) const;
     bool raycast(glm::ivec3& hit_block, glm::ivec3& adjacent_block);
     void initShaders();
+    int findSafeSpawnY(int x, int z); // 新增函数声明
+
+    // --- 新增光照相关函数 ---
+    void initializeSunlight();
+    void propagateLight();
+    void depropagateLight();
+    uint8_t getLight(const glm::ivec3& world_pos);
+    void setLight(const glm::ivec3& world_pos, uint8_t level);
+
     void initTextures();
     void initCrosshair();
     void initInventoryBar();

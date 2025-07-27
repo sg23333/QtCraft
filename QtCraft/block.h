@@ -2,6 +2,7 @@
 #define BLOCK_H
 
 #include <cstdint>
+#include <glm/glm.hpp>
 
 // 方块类型枚举，用于替代魔法数字
 enum class BlockType : uint8_t {
@@ -22,5 +23,13 @@ const int Water = 4;
 const float AtlasWidth = 5.0f; // 纹理图集包含5个不同的纹理
 const float TileWidth = 1.0f / AtlasWidth;
 }
+
+// --- 顶点定义 ---
+struct Vertex {
+    glm::vec3 position;
+    glm::vec2 texCoord;
+    float lightLevel; // 新增：用于存储顶点光照等级
+};
+
 
 #endif // BLOCK_H

@@ -9,6 +9,8 @@
 #include <cstddef>
 #include <cmath>
 #include <map>
+#include <queue>
+
 
 const float PLAYER_HEIGHT = 1.8f;
 const float PLAYER_WIDTH = 0.6f;
@@ -25,6 +27,7 @@ const float MAX_SINK_SPEED = -4.0f;
 
 Chunk::Chunk() {
     memset(blocks, 0, sizeof(blocks));
+    memset(lighting, 0, sizeof(lighting)); // 初始化光照
 }
 
 Chunk::~Chunk() {
@@ -72,13 +75,16 @@ void OpenGLWindow::initShaders()
         #version 330 core
         layout (location = 0) in vec3 aPos;
         layout (location = 1) in vec2 aTexCoord;
+        layout (location = 2) in float aLight;
         uniform mat4 vp_matrix;
         uniform mat4 model_matrix;
         out vec2 TexCoord;
+        out float Light;
         void main()
         {
             gl_Position = vp_matrix * model_matrix * vec4(aPos, 1.0);
             TexCoord = aTexCoord;
+            Light = aLight;
         }
     )";
 
@@ -86,10 +92,12 @@ void OpenGLWindow::initShaders()
         #version 330 core
         out vec4 FragColor;
         in vec2 TexCoord;
+        in float Light;
         uniform sampler2D texture_atlas;
         void main()
         {
-            FragColor = texture(texture_atlas, TexCoord);
+            vec4 texColor = texture(texture_atlas, TexCoord);
+            FragColor = texColor * Light;
             if(FragColor.a < 0.1) discard;
         }
     )";
@@ -305,6 +313,21 @@ void OpenGLWindow::initOverlay() {
     m_overlay_vbo.release();
 }
 
+int OpenGLWindow::findSafeSpawnY(int x, int z) {
+    // 从世界的最大高度开始向下搜索
+    const int world_height_in_chunks = 8;
+    for (int y = world_height_in_chunks * Chunk::CHUNK_SIZE - 1; y >= 0; --y) {
+        BlockType block_type = static_cast<BlockType>(getBlock({x, y, z}));
+        // 找到第一个固体方块
+        if (block_type != BlockType::Air && block_type != BlockType::Water) {
+            // 返回该方块上方的Y坐标作为安全高度
+            return y + 1;
+        }
+    }
+    // 如果找不到地面（例如，整个世界都是空的），则返回一个默认高度
+    return 128;
+}
+
 void OpenGLWindow::initializeGL()
 {
     initializeOpenGLFunctions();
@@ -312,8 +335,13 @@ void OpenGLWindow::initializeGL()
     initTextures();
     initCrosshair();
     initInventoryBar();
-    initOverlay(); // 调用新的初始化函数
+    initOverlay();
     generateWorld();
+
+    // --- 修复玩家掉落问题 ---
+    // 在世界生成后，为摄像机找到一个安全的Y坐标
+    m_camera.Position.y = findSafeSpawnY(m_camera.Position.x, m_camera.Position.z);
+
     glClearColor(0.39f, 0.58f, 0.93f, 1.0f);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -402,8 +430,37 @@ void OpenGLWindow::generateWorld() {
     for(auto const& [coords, chunk] : m_chunks){
         chunk->needs_remeshing = true;
     }
+
+    initializeSunlight();
 }
 
+void OpenGLWindow::initializeSunlight() {
+    for (auto const& [coords, chunk_ptr] : m_chunks) {
+        Chunk* chunk = chunk_ptr.get();
+        for (int x = 0; x < Chunk::CHUNK_SIZE; ++x) {
+            for (int z = 0; z < Chunk::CHUNK_SIZE; ++z) {
+                int world_x = chunk->coords.x * Chunk::CHUNK_SIZE + x;
+                int world_z = chunk->coords.z * Chunk::CHUNK_SIZE + z;
+
+                // 从世界顶部向下扫描
+                bool blocked = false;
+                for (int y = Chunk::CHUNK_SIZE - 1; y >= 0; --y) {
+                    int world_y = chunk->coords.y * Chunk::CHUNK_SIZE + y;
+                    BlockType block_type = static_cast<BlockType>(chunk->blocks[x][y][z]);
+
+                    if (!blocked) {
+                        if (block_type == BlockType::Air || block_type == BlockType::Water) {
+                            setLight({world_x, world_y, world_z}, 15);
+                            m_light_propagation_queue.push({{world_x, world_y, world_z}, 15});
+                        } else {
+                            blocked = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 void OpenGLWindow::resizeGL(int w, int h)
 {
@@ -417,6 +474,52 @@ void OpenGLWindow::updateGame()
 
     processInput();
     updatePhysics(delta_time);
+
+    // --- 新增: 分帧处理光照更新 ---
+    const int light_updates_per_frame = 2000; // 每帧处理的光照方块数量预算
+
+    const glm::ivec3 neighbors[6] = {
+        {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}
+    };
+
+    // 1. 处理光照移除
+    for (int i = 0; i < light_updates_per_frame && !m_light_removal_queue.empty(); ++i) {
+        auto [pos, light_level] = m_light_removal_queue.front();
+        m_light_removal_queue.pop();
+
+        for (const auto& offset : neighbors) {
+            glm::ivec3 neighbor_pos = pos + offset;
+            uint8_t neighbor_light = getLight(neighbor_pos);
+
+            if (neighbor_light != 0 && neighbor_light < light_level) {
+                setLight(neighbor_pos, 0);
+                m_light_removal_queue.push({neighbor_pos, neighbor_light});
+            } else if (neighbor_light >= light_level) {
+                m_light_propagation_queue.push({neighbor_pos, neighbor_light});
+            }
+        }
+    }
+
+    // 2. 处理光照传播
+    for (int i = 0; i < light_updates_per_frame && !m_light_propagation_queue.empty(); ++i) {
+        auto [pos, light_level] = m_light_propagation_queue.front();
+        m_light_propagation_queue.pop();
+
+        if (light_level <= 1) continue;
+
+        for (const auto& offset : neighbors) {
+            glm::ivec3 neighbor_pos = pos + offset;
+            BlockType neighbor_block_type = static_cast<BlockType>(getBlock(neighbor_pos));
+
+            bool is_transparent = (neighbor_block_type == BlockType::Air || neighbor_block_type == BlockType::Water);
+
+            if (is_transparent && getLight(neighbor_pos) < light_level - 1) {
+                setLight(neighbor_pos, light_level - 1);
+                m_light_propagation_queue.push({neighbor_pos, light_level - 1});
+            }
+        }
+    }
+
 
     m_ready_chunks_mutex.lock();
     if (!m_ready_chunks.isEmpty()) {
@@ -438,6 +541,8 @@ void OpenGLWindow::updateGame()
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
                 glEnableVertexAttribArray(1);
                 glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord));
+                glEnableVertexAttribArray(2);
+                glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, lightLevel));
                 chunk->vao.release();
             }
             chunk->mesh_data.clear();
@@ -459,6 +564,8 @@ void OpenGLWindow::updateGame()
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
                 glEnableVertexAttribArray(1);
                 glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord));
+                glEnableVertexAttribArray(2);
+                glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, lightLevel));
                 chunk->vao_transparent.release();
             }
             chunk->mesh_data_transparent.clear();
@@ -882,6 +989,43 @@ void OpenGLWindow::wheelEvent(QWheelEvent *event)
     update();
 }
 
+uint8_t OpenGLWindow::getLight(const glm::ivec3& world_pos) {
+    glm::ivec3 chunk_coords = worldToChunkCoords(world_pos);
+    auto it = m_chunks.find(chunk_coords);
+    if (it == m_chunks.end()) return 0;
+
+    Chunk* chunk = it->second.get();
+    glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
+
+    if (local_pos.x < 0 || local_pos.x >= Chunk::CHUNK_SIZE ||
+        local_pos.y < 0 || local_pos.y >= Chunk::CHUNK_SIZE ||
+        local_pos.z < 0 || local_pos.z >= Chunk::CHUNK_SIZE) {
+        return 0;
+    }
+
+    return chunk->lighting[local_pos.x][local_pos.y][local_pos.z];
+}
+
+void OpenGLWindow::setLight(const glm::ivec3& world_pos, uint8_t level) {
+    glm::ivec3 chunk_coords = worldToChunkCoords(world_pos);
+    auto it = m_chunks.find(chunk_coords);
+    if (it == m_chunks.end()) return;
+
+    Chunk* chunk = it->second.get();
+    glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
+
+    if (local_pos.x < 0 || local_pos.x >= Chunk::CHUNK_SIZE ||
+        local_pos.y < 0 || local_pos.y >= Chunk::CHUNK_SIZE ||
+        local_pos.z < 0 || local_pos.z >= Chunk::CHUNK_SIZE) {
+        return;
+    }
+
+    if (chunk->lighting[local_pos.x][local_pos.y][local_pos.z] != level) {
+        chunk->lighting[local_pos.x][local_pos.y][local_pos.z] = level;
+        chunk->needs_remeshing = true;
+    }
+}
+
 
 uint8_t OpenGLWindow::getBlock(const glm::ivec3& world_pos) {
     glm::ivec3 chunk_coords = worldToChunkCoords(world_pos);
@@ -890,6 +1034,13 @@ uint8_t OpenGLWindow::getBlock(const glm::ivec3& world_pos) {
 
     Chunk* chunk = it->second.get();
     glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
+
+    if (local_pos.x < 0 || local_pos.x >= Chunk::CHUNK_SIZE ||
+        local_pos.y < 0 || local_pos.y >= Chunk::CHUNK_SIZE ||
+        local_pos.z < 0 || local_pos.z >= Chunk::CHUNK_SIZE) {
+        return static_cast<uint8_t>(BlockType::Air);
+    }
+
     return chunk->blocks[local_pos.x][local_pos.y][local_pos.z];
 }
 
@@ -904,8 +1055,32 @@ void OpenGLWindow::setBlock(const glm::ivec3& world_pos, BlockType block_id) {
     Chunk* chunk = it->second.get();
     glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
 
+    BlockType old_block_type = static_cast<BlockType>(chunk->blocks[local_pos.x][local_pos.y][local_pos.z]);
+    uint8_t old_light_level = getLight(world_pos);
+
     chunk->blocks[local_pos.x][local_pos.y][local_pos.z] = static_cast<uint8_t>(block_id);
     chunk->needs_remeshing = true;
+
+    bool is_new_block_opaque = (block_id != BlockType::Air && block_id != BlockType::Water);
+    bool is_old_block_opaque = (old_block_type != BlockType::Air && old_block_type != BlockType::Water);
+
+    if (is_new_block_opaque && !is_old_block_opaque) {
+        if (old_light_level > 0) {
+            setLight(world_pos, 0);
+            m_light_removal_queue.push({world_pos, old_light_level});
+        }
+    } else if (!is_new_block_opaque && is_old_block_opaque) {
+        const glm::ivec3 neighbors[6] = {
+            {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}
+        };
+        for (const auto& offset : neighbors) {
+            glm::ivec3 neighbor_pos = world_pos + offset;
+            uint8_t light_level = getLight(neighbor_pos);
+            if (light_level > 0) {
+                m_light_propagation_queue.push({neighbor_pos, light_level});
+            }
+        }
+    }
 
     auto trigger_neighbor_remesh = [&](const glm::ivec3& offset) {
         glm::ivec3 neighbor_world_pos = world_pos + offset;
@@ -1001,7 +1176,7 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
                 for (int i = 0; i < 6; ++i) {
                     glm::ivec3 neighbor_world_pos = chunk_coords * Chunk::CHUNK_SIZE + block_pos + neighbors[i];
                     BlockType neighbor_id = static_cast<BlockType>(getBlock(neighbor_world_pos));
-                    bool is_neighbor_transparent = (neighbor_id == BlockType::Water);
+                    bool is_neighbor_transparent = (neighbor_id == BlockType::Water || neighbor_id == BlockType::Air);
 
                     bool should_draw_face = false;
                     if (block_id == BlockType::Water) {
@@ -1009,7 +1184,7 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
                             should_draw_face = true;
                         }
                     } else {
-                        if (neighbor_id == BlockType::Air || is_neighbor_transparent) {
+                        if (is_neighbor_transparent) {
                             should_draw_face = true;
                         }
                     }
@@ -1033,11 +1208,14 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
                         float u_offset = texture_index * Texture::TileWidth;
                         glm::vec3 block_pos_f = glm::vec3(block_pos);
 
+                        uint8_t light_val = getLight(neighbor_world_pos);
+                        float light_level = static_cast<float>(light_val) / 15.0f;
+
                         Vertex v[4];
-                        v[0] = { block_pos_f + face_vertices[i][0], { u_offset, 0.0f } };
-                        v[1] = { block_pos_f + face_vertices[i][1], { u_offset + Texture::TileWidth, 0.0f } };
-                        v[2] = { block_pos_f + face_vertices[i][2], { u_offset + Texture::TileWidth, 1.0f } };
-                        v[3] = { block_pos_f + face_vertices[i][3], { u_offset, 1.0f } };
+                        v[0] = { block_pos_f + face_vertices[i][0], { u_offset, 0.0f }, light_level };
+                        v[1] = { block_pos_f + face_vertices[i][1], { u_offset + Texture::TileWidth, 0.0f }, light_level };
+                        v[2] = { block_pos_f + face_vertices[i][2], { u_offset + Texture::TileWidth, 1.0f }, light_level };
+                        v[3] = { block_pos_f + face_vertices[i][3], { u_offset, 1.0f }, light_level };
 
                         if (block_id == BlockType::Water) {
                             glm::ivec3 pos_above = chunk_coords * Chunk::CHUNK_SIZE + block_pos + glm::ivec3(0, 1, 0);
@@ -1056,7 +1234,6 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
                             vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[1]); vertices_transparent.push_back(v[2]);
                             vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[2]); vertices_transparent.push_back(v[3]);
 
-                            // 如果是顶面(i=2)，则额外添加一个反向的背面，使其在水下可见
                             if (i == 2) {
                                 vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[2]); vertices_transparent.push_back(v[1]);
                                 vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[3]); vertices_transparent.push_back(v[2]);

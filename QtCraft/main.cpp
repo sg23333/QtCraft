@@ -7,7 +7,7 @@ int main(int argc, char *argv[])
 
     // 创建我们的OpenGL窗口实例
     OpenGLWindow w;
-    w.resize(800, 600); // 设置一个初始大小
+    w.resize(400, 300); // 设置一个初始大小
     w.show();           // 显示窗口
 
     return a.exec();
