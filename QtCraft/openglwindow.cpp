@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <cmath>
 #include <map>
-#include <algorithm> // for std::max
 
 const float PLAYER_HEIGHT = 1.8f;
 const float PLAYER_WIDTH = 0.6f;
@@ -26,7 +25,6 @@ const float MAX_SINK_SPEED = -4.0f;
 
 Chunk::Chunk() {
     memset(blocks, 0, sizeof(blocks));
-    memset(lightmap, 0, sizeof(lightmap)); // 初始化光照图
 }
 
 Chunk::~Chunk() {
@@ -34,43 +32,6 @@ Chunk::~Chunk() {
     if (vao.isCreated()) vao.destroy();
     if (vbo_transparent.isCreated()) vbo_transparent.destroy();
     if (vao_transparent.isCreated()) vao_transparent.destroy();
-}
-
-// --- Chunk类的光照函数实现 ---
-uint8_t Chunk::getLight(const glm::ivec3& pos) const {
-    if (pos.x < 0 || pos.x >= CHUNK_SIZE || pos.y < 0 || pos.y >= CHUNK_SIZE || pos.z < 0 || pos.z >= CHUNK_SIZE) {
-        return 0; // 或者处理跨区块的查询
-    }
-    uint8_t sky = getSkyLight(pos);
-    uint8_t block = getBlockLight(pos);
-    return std::max(sky, block);
-}
-
-void Chunk::setLight(const glm::ivec3& pos, uint8_t light) {
-    if (pos.x < 0 || pos.x >= CHUNK_SIZE || pos.y < 0 || pos.y >= CHUNK_SIZE || pos.z < 0 || pos.z >= CHUNK_SIZE) return;
-    lightmap[pos.x][pos.y][pos.z] = light;
-}
-
-uint8_t Chunk::getSkyLight(const glm::ivec3& pos) const {
-    if (pos.x < 0 || pos.x >= CHUNK_SIZE || pos.y < 0 || pos.y >= CHUNK_SIZE || pos.z < 0 || pos.z >= CHUNK_SIZE) return 0;
-    return (lightmap[pos.x][pos.y][pos.z] >> 4) & 0x0F;
-}
-
-void Chunk::setSkyLight(const glm::ivec3& pos, uint8_t light) {
-    if (pos.x < 0 || pos.x >= CHUNK_SIZE || pos.y < 0 || pos.y >= CHUNK_SIZE || pos.z < 0 || pos.z >= CHUNK_SIZE) return;
-    uint8_t current_block_light = getBlockLight(pos);
-    lightmap[pos.x][pos.y][pos.z] = (light << 4) | current_block_light;
-}
-
-uint8_t Chunk::getBlockLight(const glm::ivec3& pos) const {
-    if (pos.x < 0 || pos.x >= CHUNK_SIZE || pos.y < 0 || pos.y >= CHUNK_SIZE || pos.z < 0 || pos.z >= CHUNK_SIZE) return 0;
-    return lightmap[pos.x][pos.y][pos.z] & 0x0F;
-}
-
-void Chunk::setBlockLight(const glm::ivec3& pos, uint8_t light) {
-    if (pos.x < 0 || pos.x >= CHUNK_SIZE || pos.y < 0 || pos.y >= CHUNK_SIZE || pos.z < 0 || pos.z >= CHUNK_SIZE) return;
-    uint8_t current_sky_light = getSkyLight(pos);
-    lightmap[pos.x][pos.y][pos.z] = (current_sky_light << 4) | light;
 }
 
 OpenGLWindow::OpenGLWindow(QWidget *parent)
@@ -106,46 +67,30 @@ OpenGLWindow::~OpenGLWindow()
 
 void OpenGLWindow::initShaders()
 {
-    // --- 修改顶点着色器 ---
+    // 主场景着色器
     const char *vsrc = R"(
         #version 330 core
         layout (location = 0) in vec3 aPos;
         layout (location = 1) in vec2 aTexCoord;
-        layout (location = 2) in float aLightLevel; // 新增：接收光照等级属性
-
         uniform mat4 vp_matrix;
         uniform mat4 model_matrix;
-
         out vec2 TexCoord;
-        out float LightLevel; // 新增：传递给片段着色器
-
         void main()
         {
             gl_Position = vp_matrix * model_matrix * vec4(aPos, 1.0);
             TexCoord = aTexCoord;
-            LightLevel = aLightLevel; // 传递光照等级
         }
     )";
 
-    // --- 修改片段着色器 ---
     const char *fsrc = R"(
         #version 330 core
         out vec4 FragColor;
-
         in vec2 TexCoord;
-        in float LightLevel; // 新增：接收光照等级
-
         uniform sampler2D texture_atlas;
-
         void main()
         {
-            vec4 texColor = texture(texture_atlas, TexCoord);
-            if(texColor.a < 0.1) discard;
-
-            // 根据光照等级调整最终颜色
-            // 将 [0, 15] 的光照等级映射到 [0.2, 1] 的亮度因子（0.2作为基础环境光）
-            float lightFactor = 0.2 + (LightLevel / 15.0) * 0.8;
-            FragColor = vec4(texColor.rgb * lightFactor, texColor.a);
+            FragColor = texture(texture_atlas, TexCoord);
+            if(FragColor.a < 0.1) discard;
         }
     )";
 
@@ -436,26 +381,6 @@ void OpenGLWindow::generateChunk(Chunk* chunk, const glm::ivec3& chunk_coords)
     }
 }
 
-// --- 简单的天空光照传播 ---
-void OpenGLWindow::propagateLight() {
-    qDebug() << "开始计算光照...";
-    for (auto const& [coords, chunk_ptr] : m_chunks) {
-        for (int x = 0; x < Chunk::CHUNK_SIZE; ++x) {
-            for (int z = 0; z < Chunk::CHUNK_SIZE; ++z) {
-                // 从上到下扫描天空光
-                uint8_t current_sky_light = Light::MAX_SKY_LIGHT;
-                for (int y = Chunk::CHUNK_SIZE - 1; y >= 0; --y) {
-                    BlockType block_type = static_cast<BlockType>(chunk_ptr->blocks[x][y][z]);
-                    if (block_type != BlockType::Air && block_type != BlockType::Water) {
-                        current_sky_light = 0; // 遇到不透明方块，光线被阻挡
-                    }
-                    chunk_ptr->setSkyLight({x,y,z}, current_sky_light);
-                }
-            }
-        }
-    }
-    qDebug() << "光照计算完成。";
-}
 
 void OpenGLWindow::generateWorld() {
     int world_size_in_chunks = 24;
@@ -473,9 +398,6 @@ void OpenGLWindow::generateWorld() {
         }
     }
     qDebug() << "生成了" << m_chunks.size() << "个区块。";
-
-    // --- 新增：在世界生成后计算一次光照 ---
-    propagateLight();
 
     for(auto const& [coords, chunk] : m_chunks){
         chunk->needs_remeshing = true;
@@ -516,10 +438,6 @@ void OpenGLWindow::updateGame()
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
                 glEnableVertexAttribArray(1);
                 glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord));
-                // --- 新增：设置光照属性指针 ---
-                glEnableVertexAttribArray(2);
-                glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, lightLevel));
-
                 chunk->vao.release();
             }
             chunk->mesh_data.clear();
@@ -541,10 +459,6 @@ void OpenGLWindow::updateGame()
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
                 glEnableVertexAttribArray(1);
                 glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord));
-                // --- 新增：设置光照属性指针 ---
-                glEnableVertexAttribArray(2);
-                glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, lightLevel));
-
                 chunk->vao_transparent.release();
             }
             chunk->mesh_data_transparent.clear();
@@ -640,8 +554,11 @@ void OpenGLWindow::paintGL()
 
     m_program.release();
 
+    // --- 【已修改】先绘制水下效果叠加层 ---
     if (m_is_in_water) {
         glDisable(GL_DEPTH_TEST);
+        // Blend func 仍然是 GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
+        // 它对于半透明颜色是正确的
 
         m_overlay_program.bind();
         m_overlay_program.setUniformValue(m_overlay_color_location, QVector4D(0.1f, 0.4f, 0.8f, 0.4f));
@@ -653,6 +570,7 @@ void OpenGLWindow::paintGL()
     }
 
 
+    // --- 接着绘制2D UI ---
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
 
@@ -665,6 +583,7 @@ void OpenGLWindow::paintGL()
 
     m_ui_vao.bind();
 
+    // 绘制物品栏背景
     float hotbar_width = 364.0f;
     float hotbar_height = 44.0f;
     float hotbar_x = (width() - hotbar_width) / 2.0f;
@@ -676,6 +595,7 @@ void OpenGLWindow::paintGL()
     m_hotbar_texture->bind();
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
+    // 绘制物品图标
     m_texture_atlas->bind();
     float item_icon_size = 32.0f;
     glUniform2f(m_ui_uv_scale_location, Texture::TileWidth, 1.0f);
@@ -705,6 +625,8 @@ void OpenGLWindow::paintGL()
         }
     }
 
+
+    // 绘制高亮选择框
     glUniform2f(m_ui_uv_offset_location, 0.0f, 0.0f);
     glUniform2f(m_ui_uv_scale_location, 1.0f, 1.0f);
     float selector_size = 48.0f;
@@ -722,6 +644,7 @@ void OpenGLWindow::paintGL()
 
     glEnable(GL_CULL_FACE);
 
+    // --- 最后绘制准星 ---
     m_crosshair_program.bind();
     glm::mat4 crosshair_proj = glm::ortho(-width()/2.0f, width()/2.0f, -height()/2.0f, height()/2.0f, -1.0f, 1.0f);
     glUniformMatrix4fv(m_crosshair_proj_matrix_location, 1, GL_FALSE, glm::value_ptr(crosshair_proj));
@@ -755,30 +678,40 @@ void OpenGLWindow::updatePhysics(float deltaTime)
 
     // --- 3. 根据环境应用物理规则 ---
     if (m_is_in_water) {
-        m_is_on_ground = false;
+        // --- 水中物理 ---
+        m_is_on_ground = false; // 在水中不能算作“在地面上”
 
+        // 应用较弱的重力（浮力效果）
         m_player_velocity.y += WATER_GRAVITY * deltaTime;
 
+        // 按住空格键时上浮
         if (m_pressed_keys.contains(Qt::Key_Space)) {
             m_player_velocity.y = SWIM_VELOCITY;
         }
 
+        // 限制最大下沉速度
         if (m_player_velocity.y < MAX_SINK_SPEED) {
             m_player_velocity.y = MAX_SINK_SPEED;
         }
 
+        // 减慢水平移动速度
         if (glm::length(inputVelocity) > 0.0f) {
             inputVelocity = glm::normalize(inputVelocity) * MOVE_SPEED * WATER_MOVE_SPEED_MULTIPLIER;
         }
 
     } else {
+        // --- 陆地/空中物理 ---
+
+        // 应用正常重力
         m_player_velocity.y += GRAVITY * deltaTime;
 
+        // 在地面上时才能跳跃
         if (m_pressed_keys.contains(Qt::Key_Space) && m_is_on_ground) {
             m_player_velocity.y = JUMP_VELOCITY;
             m_is_on_ground = false;
         }
 
+        // 正常水平移动速度
         if (glm::length(inputVelocity) > 0.0f) {
             inputVelocity = glm::normalize(inputVelocity) * MOVE_SPEED;
         }
@@ -957,45 +890,7 @@ uint8_t OpenGLWindow::getBlock(const glm::ivec3& world_pos) {
 
     Chunk* chunk = it->second.get();
     glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
-
-    // 边界检查
-    if (local_pos.x < 0 || local_pos.x >= Chunk::CHUNK_SIZE ||
-        local_pos.y < 0 || local_pos.y >= Chunk::CHUNK_SIZE ||
-        local_pos.z < 0 || local_pos.z >= Chunk::CHUNK_SIZE)
-    {
-        // 跨区块查询，这里简化处理，实际应查询邻近区块
-        return static_cast<uint8_t>(BlockType::Air);
-    }
-
     return chunk->blocks[local_pos.x][local_pos.y][local_pos.z];
-}
-
-// --- OpenGLWindow类的光照获取/设置函数 ---
-uint8_t OpenGLWindow::getLight(const glm::ivec3& world_pos) {
-    glm::ivec3 chunk_coords = worldToChunkCoords(world_pos);
-    auto it = m_chunks.find(chunk_coords);
-    if (it == m_chunks.end()) {
-        int world_size_in_chunks = 24;
-        int world_height_in_chunks = 8;
-        int world_height = world_height_in_chunks * Chunk::CHUNK_SIZE;
-        if (world_pos.y >= world_height / 2) return Light::MAX_SKY_LIGHT;
-        return 0;
-    }
-
-    Chunk* chunk = it->second.get();
-    glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
-    return chunk->getLight(local_pos);
-}
-
-void OpenGLWindow::setLight(const glm::ivec3& world_pos, uint8_t light) {
-    glm::ivec3 chunk_coords = worldToChunkCoords(world_pos);
-    auto it = m_chunks.find(chunk_coords);
-    if (it != m_chunks.end()) {
-        Chunk* chunk = it->second.get();
-        glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
-        chunk->setLight(local_pos, light);
-        chunk->needs_remeshing = true;
-    }
 }
 
 void OpenGLWindow::setBlock(const glm::ivec3& world_pos, BlockType block_id) {
@@ -1010,10 +905,6 @@ void OpenGLWindow::setBlock(const glm::ivec3& world_pos, BlockType block_id) {
     glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
 
     chunk->blocks[local_pos.x][local_pos.y][local_pos.z] = static_cast<uint8_t>(block_id);
-
-    // --- 在放置/破坏方块后，需要重新计算光照并更新相关区块 ---
-    propagateLight();
-
     chunk->needs_remeshing = true;
 
     auto trigger_neighbor_remesh = [&](const glm::ivec3& offset) {
@@ -1110,8 +1001,6 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
                 for (int i = 0; i < 6; ++i) {
                     glm::ivec3 neighbor_world_pos = chunk_coords * Chunk::CHUNK_SIZE + block_pos + neighbors[i];
                     BlockType neighbor_id = static_cast<BlockType>(getBlock(neighbor_world_pos));
-                    uint8_t neighbor_light_level = getLight(neighbor_world_pos);
-
                     bool is_neighbor_transparent = (neighbor_id == BlockType::Water);
 
                     bool should_draw_face = false;
@@ -1145,10 +1034,10 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
                         glm::vec3 block_pos_f = glm::vec3(block_pos);
 
                         Vertex v[4];
-                        v[0] = { block_pos_f + face_vertices[i][0], { u_offset, 0.0f }, (float)neighbor_light_level };
-                        v[1] = { block_pos_f + face_vertices[i][1], { u_offset + Texture::TileWidth, 0.0f }, (float)neighbor_light_level };
-                        v[2] = { block_pos_f + face_vertices[i][2], { u_offset + Texture::TileWidth, 1.0f }, (float)neighbor_light_level };
-                        v[3] = { block_pos_f + face_vertices[i][3], { u_offset, 1.0f }, (float)neighbor_light_level };
+                        v[0] = { block_pos_f + face_vertices[i][0], { u_offset, 0.0f } };
+                        v[1] = { block_pos_f + face_vertices[i][1], { u_offset + Texture::TileWidth, 0.0f } };
+                        v[2] = { block_pos_f + face_vertices[i][2], { u_offset + Texture::TileWidth, 1.0f } };
+                        v[3] = { block_pos_f + face_vertices[i][3], { u_offset, 1.0f } };
 
                         if (block_id == BlockType::Water) {
                             glm::ivec3 pos_above = chunk_coords * Chunk::CHUNK_SIZE + block_pos + glm::ivec3(0, 1, 0);
@@ -1167,6 +1056,7 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
                             vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[1]); vertices_transparent.push_back(v[2]);
                             vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[2]); vertices_transparent.push_back(v[3]);
 
+                            // 如果是顶面(i=2)，则额外添加一个反向的背面，使其在水下可见
                             if (i == 2) {
                                 vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[2]); vertices_transparent.push_back(v[1]);
                                 vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[3]); vertices_transparent.push_back(v[2]);

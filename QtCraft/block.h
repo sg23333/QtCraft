@@ -23,10 +23,4 @@ const float AtlasWidth = 5.0f; // 纹理图集包含5个不同的纹理
 const float TileWidth = 1.0f / AtlasWidth;
 }
 
-// --- 新增：光照常量 ---
-namespace Light {
-const uint8_t MAX_LIGHT = 15; // 最大光照等级
-const uint8_t MAX_SKY_LIGHT = 15;
-}
-
 #endif // BLOCK_H
