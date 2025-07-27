@@ -36,9 +36,16 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/hash.hpp>
 
+// 定义世界和区块的维度常量
+const int CHUNK_SIZE_XZ = 16;
+const int WORLD_HEIGHT_IN_BLOCKS = 128; // 一个区块柱的完整高度
+
 class Chunk {
 public:
-    static const int CHUNK_SIZE = 16;
+    // 为了方便，保留了旧的常量名，但建议使用新的常量
+    static const int CHUNK_SIZE = CHUNK_SIZE_XZ;
+    static const int CHUNK_HEIGHT = WORLD_HEIGHT_IN_BLOCKS;
+
     Chunk();
     ~Chunk();
 
@@ -52,12 +59,13 @@ public:
     int vertex_count_transparent = 0;
     std::vector<Vertex> mesh_data_transparent;
 
-    uint8_t blocks[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE] = {{{0}}};
-    uint8_t lighting[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE] = {{{0}}};
+    // 区块现在存储一个完整的方块柱
+    uint8_t blocks[CHUNK_SIZE_XZ][WORLD_HEIGHT_IN_BLOCKS][CHUNK_SIZE_XZ] = {{{0}}};
+    uint8_t lighting[CHUNK_SIZE_XZ][WORLD_HEIGHT_IN_BLOCKS][CHUNK_SIZE_XZ] = {{{0}}};
     bool needs_remeshing = true;
 
     bool is_building = false;
-    glm::ivec3 coords;
+    glm::ivec3 coords; // y分量将始终为0，代表区块柱的基底
 };
 
 struct AABB {
