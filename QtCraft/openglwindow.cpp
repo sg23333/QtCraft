@@ -18,6 +18,7 @@ const float PLAYER_EYE_LEVEL = 1.6f;
 const float GRAVITY = -28.0f;
 const float JUMP_VELOCITY = 9.0f;
 const float MOVE_SPEED = 5.0f;
+const float FLY_SPEED = 10.0f; // 飞行速度
 
 // 新的水中物理常量
 const float WATER_GRAVITY = -6.0f;
@@ -47,6 +48,7 @@ OpenGLWindow::OpenGLWindow(QWidget *parent)
     m_timer.start(16);
 
     m_elapsed_timer.start();
+    m_space_press_timer.start(); // 启动计时器
 }
 
 OpenGLWindow::~OpenGLWindow()
@@ -88,17 +90,26 @@ void OpenGLWindow::initShaders()
         }
     )";
 
+    // 片段着色器 (已修改)
     const char *fsrc = R"(
         #version 330 core
         out vec4 FragColor;
         in vec2 TexCoord;
         in float Light;
         uniform sampler2D texture_atlas;
+        const float ambient_light = 0.05; // 增加一个环境光常量
+
         void main()
         {
             vec4 texColor = texture(texture_atlas, TexCoord);
-            FragColor = texColor * Light;
-            if(FragColor.a < 0.1) discard;
+            if(texColor.a < 0.1)
+            {
+                discard;
+            }
+            // 将传入的Light与环境光混合，确保最低亮度
+            float final_light = max(Light, ambient_light);
+            FragColor.rgb = texColor.rgb * final_light;
+            FragColor.a = texColor.a;
         }
     )";
 
@@ -175,7 +186,7 @@ void OpenGLWindow::initShaders()
     m_ui_uv_offset_location = m_ui_program.uniformLocation("uv_offset");
     m_ui_uv_scale_location = m_ui_program.uniformLocation("uv_scale");
 
-    // --- 新增：初始化水下效果叠加层着色器 ---
+    // 水下效果叠加层着色器
     const char* overlay_vsrc = R"(
         #version 330 core
         layout (location = 0) in vec2 aPos;
@@ -289,14 +300,8 @@ void OpenGLWindow::initInventoryBar()
 
 void OpenGLWindow::initOverlay() {
     float vertices[] = {
-        // 三角形 1
-        -1.0f, -1.0f,
-        1.0f, -1.0f,
-        1.0f,  1.0f,
-        // 三角形 2
-        1.0f,  1.0f,
-        -1.0f,  1.0f,
-        -1.0f, -1.0f
+        -1.0f, -1.0f, 1.0f, -1.0f, 1.0f,  1.0f,
+        1.0f,  1.0f, -1.0f, 1.0f, -1.0f, -1.0f
     };
 
     m_overlay_vao.create();
@@ -314,17 +319,13 @@ void OpenGLWindow::initOverlay() {
 }
 
 int OpenGLWindow::findSafeSpawnY(int x, int z) {
-    // 从世界的最大高度开始向下搜索
     const int world_height_in_chunks = 8;
     for (int y = world_height_in_chunks * Chunk::CHUNK_SIZE - 1; y >= 0; --y) {
         BlockType block_type = static_cast<BlockType>(getBlock({x, y, z}));
-        // 找到第一个固体方块
         if (block_type != BlockType::Air && block_type != BlockType::Water) {
-            // 返回该方块上方的Y坐标作为安全高度
             return y + 1;
         }
     }
-    // 如果找不到地面（例如，整个世界都是空的），则返回一个默认高度
     return 128;
 }
 
@@ -338,8 +339,7 @@ void OpenGLWindow::initializeGL()
     initOverlay();
     generateWorld();
 
-    // --- 修复玩家掉落问题 ---
-    // 在世界生成后，为摄像机找到一个安全的Y坐标
+    initializeSunlight();
     m_camera.Position.y = findSafeSpawnY(m_camera.Position.x, m_camera.Position.z);
 
     glClearColor(0.39f, 0.58f, 0.93f, 1.0f);
@@ -430,36 +430,49 @@ void OpenGLWindow::generateWorld() {
     for(auto const& [coords, chunk] : m_chunks){
         chunk->needs_remeshing = true;
     }
-
-    initializeSunlight();
 }
 
 void OpenGLWindow::initializeSunlight() {
-    for (auto const& [coords, chunk_ptr] : m_chunks) {
-        Chunk* chunk = chunk_ptr.get();
-        for (int x = 0; x < Chunk::CHUNK_SIZE; ++x) {
-            for (int z = 0; z < Chunk::CHUNK_SIZE; ++z) {
-                int world_x = chunk->coords.x * Chunk::CHUNK_SIZE + x;
-                int world_z = chunk->coords.z * Chunk::CHUNK_SIZE + z;
+    const int world_size_in_chunks = 24;
+    const int world_height_in_chunks = 8;
+    const int min_world_x = -world_size_in_chunks / 2 * Chunk::CHUNK_SIZE;
+    const int max_world_x = world_size_in_chunks / 2 * Chunk::CHUNK_SIZE;
+    const int min_world_z = -world_size_in_chunks / 2 * Chunk::CHUNK_SIZE;
+    const int max_world_z = world_size_in_chunks / 2 * Chunk::CHUNK_SIZE;
+    const int max_world_y = (world_height_in_chunks - 1) * Chunk::CHUNK_SIZE + (Chunk::CHUNK_SIZE - 1);
+    const int min_world_y_chunks = -1; // 世界最低区块Y坐标
+    const int min_world_y = min_world_y_chunks * Chunk::CHUNK_SIZE;
 
-                // 从世界顶部向下扫描
-                bool blocked = false;
-                for (int y = Chunk::CHUNK_SIZE - 1; y >= 0; --y) {
-                    int world_y = chunk->coords.y * Chunk::CHUNK_SIZE + y;
-                    BlockType block_type = static_cast<BlockType>(chunk->blocks[x][y][z]);
 
-                    if (!blocked) {
-                        if (block_type == BlockType::Air || block_type == BlockType::Water) {
-                            setLight({world_x, world_y, world_z}, 15);
-                            m_light_propagation_queue.push({{world_x, world_y, world_z}, 15});
-                        } else {
-                            blocked = true;
-                        }
+    qDebug() << "Initializing sunlight from y=" << max_world_y << "downwards...";
+
+    while(!m_light_propagation_queue.empty()) m_light_propagation_queue.pop();
+
+    for (int x = min_world_x; x < max_world_x; ++x) {
+        for (int z = min_world_z; z < max_world_z; ++z) {
+            bool light_blocked = false;
+            for (int y = max_world_y; y >= min_world_y; --y) {
+                glm::ivec3 world_pos(x, y, z);
+                if (!light_blocked) {
+                    BlockType block_type = static_cast<BlockType>(getBlock(world_pos));
+                    if (block_type == BlockType::Air || block_type == BlockType::Water) {
+                        setLight(world_pos, 15);
+                        m_light_propagation_queue.push({world_pos, 15});
+                    } else {
+                        light_blocked = true;
                     }
+                } else {
+                    //一旦被阻挡，如果下方还有区块，理论上光照应为0，但我们的setLight默认就是0，所以这里可以不做操作
+                    //如果需要，可以在这里break以优化
                 }
             }
         }
     }
+
+    qDebug() << "Sunlight initialized. Queue size:" << m_light_propagation_queue.size();
+
+    // [MODIFIED] The propagation is now handled frame-by-frame in updateGame to avoid freezing.
+    qDebug() << "Initial light propagation will be processed in game loop.";
 }
 
 void OpenGLWindow::resizeGL(int w, int h)
@@ -475,51 +488,32 @@ void OpenGLWindow::updateGame()
     processInput();
     updatePhysics(delta_time);
 
-    // --- 新增: 分帧处理光照更新 ---
-    const int light_updates_per_frame = 2000; // 每帧处理的光照方块数量预算
+    // [MODIFIED] Re-introduced frame-by-frame processing for the initial world light propagation.
+    // This loop only runs at startup until the initial massive queue is empty.
+    if (!m_light_propagation_queue.empty()) {
+        const int light_updates_per_frame = 20000; // Increased budget for faster initial fill
+        const glm::ivec3 neighbors[6] = {
+            {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}
+        };
 
-    const glm::ivec3 neighbors[6] = {
-        {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}
-    };
+        for (int i = 0; i < light_updates_per_frame && !m_light_propagation_queue.empty(); ++i) {
+            auto [pos, light_level] = m_light_propagation_queue.front();
+            m_light_propagation_queue.pop();
 
-    // 1. 处理光照移除
-    for (int i = 0; i < light_updates_per_frame && !m_light_removal_queue.empty(); ++i) {
-        auto [pos, light_level] = m_light_removal_queue.front();
-        m_light_removal_queue.pop();
+            if (light_level <= 1) continue;
 
-        for (const auto& offset : neighbors) {
-            glm::ivec3 neighbor_pos = pos + offset;
-            uint8_t neighbor_light = getLight(neighbor_pos);
+            for (const auto& offset : neighbors) {
+                glm::ivec3 neighbor_pos = pos + offset;
+                BlockType neighbor_block_type = static_cast<BlockType>(getBlock(neighbor_pos));
+                bool is_transparent = (neighbor_block_type == BlockType::Air || neighbor_block_type == BlockType::Water);
 
-            if (neighbor_light != 0 && neighbor_light < light_level) {
-                setLight(neighbor_pos, 0);
-                m_light_removal_queue.push({neighbor_pos, neighbor_light});
-            } else if (neighbor_light >= light_level) {
-                m_light_propagation_queue.push({neighbor_pos, neighbor_light});
+                if (is_transparent && getLight(neighbor_pos) < light_level - 1) {
+                    setLight(neighbor_pos, light_level - 1);
+                    m_light_propagation_queue.push({neighbor_pos, static_cast<uint8_t>(light_level - 1)});
+                }
             }
         }
     }
-
-    // 2. 处理光照传播
-    for (int i = 0; i < light_updates_per_frame && !m_light_propagation_queue.empty(); ++i) {
-        auto [pos, light_level] = m_light_propagation_queue.front();
-        m_light_propagation_queue.pop();
-
-        if (light_level <= 1) continue;
-
-        for (const auto& offset : neighbors) {
-            glm::ivec3 neighbor_pos = pos + offset;
-            BlockType neighbor_block_type = static_cast<BlockType>(getBlock(neighbor_pos));
-
-            bool is_transparent = (neighbor_block_type == BlockType::Air || neighbor_block_type == BlockType::Water);
-
-            if (is_transparent && getLight(neighbor_pos) < light_level - 1) {
-                setLight(neighbor_pos, light_level - 1);
-                m_light_propagation_queue.push({neighbor_pos, light_level - 1});
-            }
-        }
-    }
-
 
     m_ready_chunks_mutex.lock();
     if (!m_ready_chunks.isEmpty()) {
@@ -528,7 +522,6 @@ void OpenGLWindow::updateGame()
             if(chunk->mesh_data.size() > 0) {
                 if (!chunk->vao.isCreated()) chunk->vao.create();
                 chunk->vao.bind();
-
                 if (!chunk->vbo.isCreated()) {
                     chunk->vbo.create();
                     chunk->vbo.setUsagePattern(QOpenGLBuffer::DynamicDraw);
@@ -536,7 +529,6 @@ void OpenGLWindow::updateGame()
                 chunk->vbo.bind();
                 chunk->vbo.allocate(chunk->mesh_data.data(), chunk->mesh_data.size() * sizeof(Vertex));
                 chunk->vertex_count = chunk->mesh_data.size();
-
                 glEnableVertexAttribArray(0);
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
                 glEnableVertexAttribArray(1);
@@ -551,7 +543,6 @@ void OpenGLWindow::updateGame()
             if(chunk->mesh_data_transparent.size() > 0) {
                 if (!chunk->vao_transparent.isCreated()) chunk->vao_transparent.create();
                 chunk->vao_transparent.bind();
-
                 if (!chunk->vbo_transparent.isCreated()) {
                     chunk->vbo_transparent.create();
                     chunk->vbo_transparent.setUsagePattern(QOpenGLBuffer::DynamicDraw);
@@ -559,7 +550,6 @@ void OpenGLWindow::updateGame()
                 chunk->vbo_transparent.bind();
                 chunk->vbo_transparent.allocate(chunk->mesh_data_transparent.data(), chunk->mesh_data_transparent.size() * sizeof(Vertex));
                 chunk->vertex_count_transparent = chunk->mesh_data_transparent.size();
-
                 glEnableVertexAttribArray(0);
                 glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
                 glEnableVertexAttribArray(1);
@@ -661,15 +651,11 @@ void OpenGLWindow::paintGL()
 
     m_program.release();
 
-    // --- 【已修改】先绘制水下效果叠加层 ---
     if (m_is_in_water) {
         glDisable(GL_DEPTH_TEST);
-        // Blend func 仍然是 GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
-        // 它对于半透明颜色是正确的
-
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         m_overlay_program.bind();
         m_overlay_program.setUniformValue(m_overlay_color_location, QVector4D(0.1f, 0.4f, 0.8f, 0.4f));
-
         m_overlay_vao.bind();
         glDrawArrays(GL_TRIANGLES, 0, 6);
         m_overlay_vao.release();
@@ -677,7 +663,6 @@ void OpenGLWindow::paintGL()
     }
 
 
-    // --- 接着绘制2D UI ---
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
 
@@ -690,7 +675,6 @@ void OpenGLWindow::paintGL()
 
     m_ui_vao.bind();
 
-    // 绘制物品栏背景
     float hotbar_width = 364.0f;
     float hotbar_height = 44.0f;
     float hotbar_x = (width() - hotbar_width) / 2.0f;
@@ -702,7 +686,6 @@ void OpenGLWindow::paintGL()
     m_hotbar_texture->bind();
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
-    // 绘制物品图标
     m_texture_atlas->bind();
     float item_icon_size = 32.0f;
     glUniform2f(m_ui_uv_scale_location, Texture::TileWidth, 1.0f);
@@ -732,8 +715,6 @@ void OpenGLWindow::paintGL()
         }
     }
 
-
-    // 绘制高亮选择框
     glUniform2f(m_ui_uv_offset_location, 0.0f, 0.0f);
     glUniform2f(m_ui_uv_scale_location, 1.0f, 1.0f);
     float selector_size = 48.0f;
@@ -751,7 +732,6 @@ void OpenGLWindow::paintGL()
 
     glEnable(GL_CULL_FACE);
 
-    // --- 最后绘制准星 ---
     m_crosshair_program.bind();
     glm::mat4 crosshair_proj = glm::ortho(-width()/2.0f, width()/2.0f, -height()/2.0f, height()/2.0f, -1.0f, 1.0f);
     glUniformMatrix4fv(m_crosshair_proj_matrix_location, 1, GL_FALSE, glm::value_ptr(crosshair_proj));
@@ -767,68 +747,52 @@ void OpenGLWindow::processInput()
 
 void OpenGLWindow::updatePhysics(float deltaTime)
 {
-    // --- 1. 判断玩家环境 ---
-    glm::ivec3 player_head_pos = glm::floor(m_camera.Position + glm::vec3(0.0f, PLAYER_EYE_LEVEL, 0.0f));
-    BlockType block_at_head = static_cast<BlockType>(getBlock(player_head_pos));
-    m_is_in_water = (block_at_head == BlockType::Water);
-
-    // --- 2. 获取玩家输入 ---
     glm::vec3 inputVelocity(0.0f);
     glm::vec3 flat_front = glm::normalize(glm::vec3(m_camera.Front.x, 0.0f, m_camera.Front.z));
     glm::vec3 flat_right = glm::normalize(glm::cross(flat_front, glm::vec3(0.0,1.0,0.0)));
-
 
     if (m_pressed_keys.contains(Qt::Key_W)) inputVelocity += flat_front;
     if (m_pressed_keys.contains(Qt::Key_S)) inputVelocity -= flat_front;
     if (m_pressed_keys.contains(Qt::Key_A)) inputVelocity -= flat_right;
     if (m_pressed_keys.contains(Qt::Key_D)) inputVelocity += flat_right;
 
-    // --- 3. 根据环境应用物理规则 ---
-    if (m_is_in_water) {
-        // --- 水中物理 ---
-        m_is_on_ground = false; // 在水中不能算作“在地面上”
+    if (m_is_flying) {
+        m_player_velocity.y = 0;
+        if (m_pressed_keys.contains(Qt::Key_Space)) m_player_velocity.y = FLY_SPEED;
+        if (m_pressed_keys.contains(Qt::Key_Shift)) m_player_velocity.y = -FLY_SPEED;
 
-        // 应用较弱的重力（浮力效果）
-        m_player_velocity.y += WATER_GRAVITY * deltaTime;
-
-        // 按住空格键时上浮
-        if (m_pressed_keys.contains(Qt::Key_Space)) {
-            m_player_velocity.y = SWIM_VELOCITY;
-        }
-
-        // 限制最大下沉速度
-        if (m_player_velocity.y < MAX_SINK_SPEED) {
-            m_player_velocity.y = MAX_SINK_SPEED;
-        }
-
-        // 减慢水平移动速度
         if (glm::length(inputVelocity) > 0.0f) {
-            inputVelocity = glm::normalize(inputVelocity) * MOVE_SPEED * WATER_MOVE_SPEED_MULTIPLIER;
+            inputVelocity = glm::normalize(inputVelocity) * FLY_SPEED;
         }
-
+        m_player_velocity.x = inputVelocity.x;
+        m_player_velocity.z = inputVelocity.z;
+        resolveCollisions(m_camera.Position, m_player_velocity * deltaTime);
     } else {
-        // --- 陆地/空中物理 ---
+        glm::ivec3 player_head_pos = glm::floor(m_camera.Position + glm::vec3(0.0f, PLAYER_EYE_LEVEL, 0.0f));
+        m_is_in_water = (static_cast<BlockType>(getBlock(player_head_pos)) == BlockType::Water);
 
-        // 应用正常重力
-        m_player_velocity.y += GRAVITY * deltaTime;
-
-        // 在地面上时才能跳跃
-        if (m_pressed_keys.contains(Qt::Key_Space) && m_is_on_ground) {
-            m_player_velocity.y = JUMP_VELOCITY;
+        if (m_is_in_water) {
             m_is_on_ground = false;
+            m_player_velocity.y += WATER_GRAVITY * deltaTime;
+            if (m_pressed_keys.contains(Qt::Key_Space)) m_player_velocity.y = SWIM_VELOCITY;
+            if (m_player_velocity.y < MAX_SINK_SPEED) m_player_velocity.y = MAX_SINK_SPEED;
+            if (glm::length(inputVelocity) > 0.0f) {
+                inputVelocity = glm::normalize(inputVelocity) * MOVE_SPEED * WATER_MOVE_SPEED_MULTIPLIER;
+            }
+        } else {
+            m_player_velocity.y += GRAVITY * deltaTime;
+            if (m_pressed_keys.contains(Qt::Key_Space) && m_is_on_ground) {
+                m_player_velocity.y = JUMP_VELOCITY;
+                m_is_on_ground = false;
+            }
+            if (glm::length(inputVelocity) > 0.0f) {
+                inputVelocity = glm::normalize(inputVelocity) * MOVE_SPEED;
+            }
         }
-
-        // 正常水平移动速度
-        if (glm::length(inputVelocity) > 0.0f) {
-            inputVelocity = glm::normalize(inputVelocity) * MOVE_SPEED;
-        }
+        m_player_velocity.x = inputVelocity.x;
+        m_player_velocity.z = inputVelocity.z;
+        resolveCollisions(m_camera.Position, m_player_velocity * deltaTime);
     }
-
-    // --- 4. 应用最终速度并进行碰撞检测 ---
-    m_player_velocity.x = inputVelocity.x;
-    m_player_velocity.z = inputVelocity.z;
-
-    resolveCollisions(m_camera.Position, m_player_velocity * deltaTime);
 }
 
 AABB OpenGLWindow::getPlayerAABB(const glm::vec3& position) const
@@ -906,7 +870,7 @@ void OpenGLWindow::resolveCollisions(glm::vec3& position, const glm::vec3& veloc
                             position.y = block_box.min.y - PLAYER_HEIGHT - 0.0001f;
                         } else if (velocity.y < 0) {
                             position.y = block_box.max.y;
-                            m_is_on_ground = true;
+                            if(!m_is_flying) m_is_on_ground = true;
                         }
                         m_player_velocity.y = 0;
                         player_box = getPlayerAABB(position);
@@ -927,6 +891,17 @@ void OpenGLWindow::keyPressEvent(QKeyEvent *event)
     if (event->key() >= Qt::Key_1 && event->key() <= Qt::Key_9) {
         m_inventory.setSlot(event->key() - Qt::Key_1);
     }
+
+    if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
+        if (m_space_press_timer.elapsed() < 300) {
+            m_is_flying = !m_is_flying;
+            if (!m_is_flying) {
+                m_player_velocity.y = 0;
+            }
+        }
+        m_space_press_timer.restart();
+    }
+
 
     if (!event->isAutoRepeat()) m_pressed_keys.insert(event->key());
 }
@@ -1000,7 +975,7 @@ uint8_t OpenGLWindow::getLight(const glm::ivec3& world_pos) {
     if (local_pos.x < 0 || local_pos.x >= Chunk::CHUNK_SIZE ||
         local_pos.y < 0 || local_pos.y >= Chunk::CHUNK_SIZE ||
         local_pos.z < 0 || local_pos.z >= Chunk::CHUNK_SIZE) {
-        return 0;
+        return 0; // Should not happen if worldToChunkCoords is correct
     }
 
     return chunk->lighting[local_pos.x][local_pos.y][local_pos.z];
@@ -1038,68 +1013,188 @@ uint8_t OpenGLWindow::getBlock(const glm::ivec3& world_pos) {
     if (local_pos.x < 0 || local_pos.x >= Chunk::CHUNK_SIZE ||
         local_pos.y < 0 || local_pos.y >= Chunk::CHUNK_SIZE ||
         local_pos.z < 0 || local_pos.z >= Chunk::CHUNK_SIZE) {
+        // This case indicates the world position is outside the chunk bounds,
+        // which should technically be handled by finding the correct chunk.
+        // But as a fallback, we treat it as Air.
         return static_cast<uint8_t>(BlockType::Air);
     }
 
     return chunk->blocks[local_pos.x][local_pos.y][local_pos.z];
 }
 
+void OpenGLWindow::removeLight(std::queue<LightNode>& removal_queue) {
+    const glm::ivec3 neighbors[6] = {
+        {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}
+    };
+
+    std::queue<LightNode> propagation_queue;
+
+    while (!removal_queue.empty()) {
+        auto [pos, light_level] = removal_queue.front();
+        removal_queue.pop();
+
+        for (const auto& offset : neighbors) {
+            glm::ivec3 neighbor_pos = pos + offset;
+            uint8_t neighbor_light = getLight(neighbor_pos);
+
+            if (neighbor_light != 0 && neighbor_light < light_level) {
+                setLight(neighbor_pos, 0);
+                removal_queue.push({neighbor_pos, neighbor_light});
+            } else if (neighbor_light >= light_level) {
+                propagation_queue.push({neighbor_pos, neighbor_light});
+            }
+        }
+    }
+
+    propagateLight(propagation_queue);
+}
+
+void OpenGLWindow::propagateLight(std::queue<LightNode>& propagation_queue) {
+    const glm::ivec3 neighbors[6] = {
+        {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}
+    };
+
+    while (!propagation_queue.empty()) {
+        auto [pos, light_level] = propagation_queue.front();
+        propagation_queue.pop();
+
+        if (light_level <= 1) continue;
+
+        for (const auto& offset : neighbors) {
+            glm::ivec3 neighbor_pos = pos + offset;
+            BlockType neighbor_block_type = static_cast<BlockType>(getBlock(neighbor_pos));
+            bool is_transparent = (neighbor_block_type == BlockType::Air || neighbor_block_type == BlockType::Water);
+
+            if (is_transparent && getLight(neighbor_pos) < light_level - 1) {
+                setLight(neighbor_pos, light_level - 1);
+                propagation_queue.push({neighbor_pos, static_cast<uint8_t>(light_level - 1)});
+            }
+        }
+    }
+}
+
 void OpenGLWindow::setBlock(const glm::ivec3& world_pos, BlockType block_id) {
     glm::ivec3 chunk_coords = worldToChunkCoords(world_pos);
     auto it = m_chunks.find(chunk_coords);
     if (it == m_chunks.end()) {
-        qDebug() << "无法在不存在的区块中放置方块。";
         return;
     }
 
     Chunk* chunk = it->second.get();
     glm::ivec3 local_pos = world_pos - chunk_coords * Chunk::CHUNK_SIZE;
 
-    BlockType old_block_type = static_cast<BlockType>(chunk->blocks[local_pos.x][local_pos.y][local_pos.z]);
-    uint8_t old_light_level = getLight(world_pos);
+    if (local_pos.x < 0 || local_pos.x >= Chunk::CHUNK_SIZE ||
+        local_pos.y < 0 || local_pos.y >= Chunk::CHUNK_SIZE ||
+        local_pos.z < 0 || local_pos.z >= Chunk::CHUNK_SIZE) {
+        return;
+    }
 
+    BlockType old_block_type = static_cast<BlockType>(chunk->blocks[local_pos.x][local_pos.y][local_pos.z]);
+    if (old_block_type == block_id) {
+        return;
+    }
+
+    uint8_t old_light_level = getLight(world_pos);
     chunk->blocks[local_pos.x][local_pos.y][local_pos.z] = static_cast<uint8_t>(block_id);
     chunk->needs_remeshing = true;
 
-    bool is_new_block_opaque = (block_id != BlockType::Air && block_id != BlockType::Water);
-    bool is_old_block_opaque = (old_block_type != BlockType::Air && old_block_type != BlockType::Water);
+    bool was_transparent = (old_block_type == BlockType::Air || old_block_type == BlockType::Water);
+    bool is_transparent = (block_id == BlockType::Air || block_id == BlockType::Water);
 
-    if (is_new_block_opaque && !is_old_block_opaque) {
-        if (old_light_level > 0) {
-            setLight(world_pos, 0);
-            m_light_removal_queue.push({world_pos, old_light_level});
-        }
-    } else if (!is_new_block_opaque && is_old_block_opaque) {
-        const glm::ivec3 neighbors[6] = {
-            {0, 0, 1}, {0, 0, -1}, {0, 1, 0}, {0, -1, 0}, {1, 0, 0}, {-1, 0, 0}
-        };
-        for (const auto& offset : neighbors) {
-            glm::ivec3 neighbor_pos = world_pos + offset;
-            uint8_t light_level = getLight(neighbor_pos);
-            if (light_level > 0) {
-                m_light_propagation_queue.push({neighbor_pos, light_level});
+    // 从不透明变为透明 -> 光线可以进入
+    if (!was_transparent && is_transparent) {
+        std::queue<LightNode> light_propagation_queue;
+
+        // 检查此位置是否直接暴露于天空
+        bool exposed_to_sky = true;
+        const int world_height_in_chunks = 8;
+        int world_max_y = (world_height_in_chunks - 1) * Chunk::CHUNK_SIZE + (Chunk::CHUNK_SIZE - 1);
+        for (int y = world_pos.y + 1; y <= world_max_y; ++y) {
+            BlockType block_above = static_cast<BlockType>(getBlock({world_pos.x, y, world_pos.z}));
+            if (block_above != BlockType::Air && block_above != BlockType::Water) {
+                exposed_to_sky = false;
+                break;
             }
+        }
+
+        // 如果暴露于天空，则向下传播满级光
+        if (exposed_to_sky) {
+            const int min_world_y_chunks = -1;
+            const int min_world_y = min_world_y_chunks * Chunk::CHUNK_SIZE;
+            // 从当前被破坏的方块位置开始向下传播天空光
+            for (int y = world_pos.y; y >= min_world_y; --y) { // 允许传播到负y坐标
+                glm::ivec3 current_pos(world_pos.x, y, world_pos.z);
+                BlockType current_block = static_cast<BlockType>(getBlock(current_pos));
+                // 如果遇到不透明方块就停止
+                if (current_block != BlockType::Air && current_block != BlockType::Water) break;
+                // 只有当光照等级低于15时才更新和传播，避免冗余计算
+                if (getLight(current_pos) < 15) {
+                    setLight(current_pos, 15);
+                    light_propagation_queue.push({current_pos, 15});
+                }
+            }
+        }
+
+        // 即使不暴露于天空，也要根据邻居的光照更新当前方块的光照
+        const glm::ivec3 neighbors[6] = {{0,0,1},{0,0,-1},{0,1,0},{0,-1,0},{1,0,0},{-1,0,0}};
+        uint8_t max_neighbor_light = 0;
+        for (const auto& offset : neighbors) {
+            max_neighbor_light = std::max(max_neighbor_light, getLight(world_pos + offset));
+        }
+        if (max_neighbor_light > 0) {
+            // 新的光照等级是邻居最高光照减1
+            uint8_t new_light = max_neighbor_light - 1;
+            // 只有当计算出的新光照比当前光照强时才更新
+            if (getLight(world_pos) < new_light) {
+                setLight(world_pos, new_light);
+                light_propagation_queue.push({world_pos, new_light});
+            }
+        } else { // 如果没有发光的邻居，并且没有暴露在天空下，它应该继承之前的位置的光照值
+            if (getLight(world_pos) > 0) {
+                light_propagation_queue.push({world_pos, getLight(world_pos)});
+            }
+        }
+
+        // 将所有需要更新的光照节点进行传播
+        propagateLight(light_propagation_queue);
+
+    } else if (was_transparent && !is_transparent) { // 从透明变为不透明 -> 阻挡光线
+        if (old_light_level > 0) {
+            std::queue<LightNode> light_removal_queue;
+            light_removal_queue.push({world_pos, old_light_level});
+            setLight(world_pos, 0); // 将新放置的方块光照设为0
+            removeLight(light_removal_queue); // 移除旧光照并重新计算周边光照
         }
     }
 
-    auto trigger_neighbor_remesh = [&](const glm::ivec3& offset) {
-        glm::ivec3 neighbor_world_pos = world_pos + offset;
-        glm::ivec3 neighbor_chunk_coords = worldToChunkCoords(neighbor_world_pos);
-        if (neighbor_chunk_coords != chunk_coords) {
-            auto neighbor_it = m_chunks.find(neighbor_chunk_coords);
-            if (neighbor_it != m_chunks.end()) {
-                neighbor_it->second->needs_remeshing = true;
-            }
-        }
-    };
 
-    if (local_pos.x == 0) trigger_neighbor_remesh({-1, 0, 0});
-    if (local_pos.x == Chunk::CHUNK_SIZE - 1) trigger_neighbor_remesh({1, 0, 0});
-    if (local_pos.y == 0) trigger_neighbor_remesh({0, -1, 0});
-    if (local_pos.y == Chunk::CHUNK_SIZE - 1) trigger_neighbor_remesh({0, 1, 0});
-    if (local_pos.z == 0) trigger_neighbor_remesh({0, 0, -1});
-    if (local_pos.z == Chunk::CHUNK_SIZE - 1) trigger_neighbor_remesh({0, 0, 1});
+    // 标记邻近区块需要重新构建网格
+    if (local_pos.x == 0) {
+        auto neighbor_it = m_chunks.find(chunk_coords + glm::ivec3(-1, 0, 0));
+        if (neighbor_it != m_chunks.end()) neighbor_it->second->needs_remeshing = true;
+    }
+    if (local_pos.x == Chunk::CHUNK_SIZE - 1) {
+        auto neighbor_it = m_chunks.find(chunk_coords + glm::ivec3(1, 0, 0));
+        if (neighbor_it != m_chunks.end()) neighbor_it->second->needs_remeshing = true;
+    }
+    if (local_pos.y == 0) {
+        auto neighbor_it = m_chunks.find(chunk_coords + glm::ivec3(0, -1, 0));
+        if (neighbor_it != m_chunks.end()) neighbor_it->second->needs_remeshing = true;
+    }
+    if (local_pos.y == Chunk::CHUNK_SIZE - 1) {
+        auto neighbor_it = m_chunks.find(chunk_coords + glm::ivec3(0, 1, 0));
+        if (neighbor_it != m_chunks.end()) neighbor_it->second->needs_remeshing = true;
+    }
+    if (local_pos.z == 0) {
+        auto neighbor_it = m_chunks.find(chunk_coords + glm::ivec3(0, 0, -1));
+        if (neighbor_it != m_chunks.end()) neighbor_it->second->needs_remeshing = true;
+    }
+    if (local_pos.z == Chunk::CHUNK_SIZE - 1) {
+        auto neighbor_it = m_chunks.find(chunk_coords + glm::ivec3(0, 0, 1));
+        if (neighbor_it != m_chunks.end()) neighbor_it->second->needs_remeshing = true;
+    }
 }
+
 
 glm::ivec3 OpenGLWindow::worldToChunkCoords(const glm::ivec3& world_pos) {
     return {
@@ -1233,11 +1328,6 @@ void OpenGLWindow::buildChunkMesh(Chunk* chunk)
                         if (block_id == BlockType::Water) {
                             vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[1]); vertices_transparent.push_back(v[2]);
                             vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[2]); vertices_transparent.push_back(v[3]);
-
-                            if (i == 2) {
-                                vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[2]); vertices_transparent.push_back(v[1]);
-                                vertices_transparent.push_back(v[0]); vertices_transparent.push_back(v[3]); vertices_transparent.push_back(v[2]);
-                            }
                         } else {
                             vertices_opaque.push_back(v[0]); vertices_opaque.push_back(v[1]); vertices_opaque.push_back(v[2]);
                             vertices_opaque.push_back(v[0]); vertices_opaque.push_back(v[2]); vertices_opaque.push_back(v[3]);

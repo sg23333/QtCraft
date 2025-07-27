@@ -16,9 +16,8 @@
 #include <unordered_map>
 #include <memory>
 #include <map>
-#include <queue> // 新增
+#include <queue>
 
-// --- 新增的头文件 ---
 #include <QtConcurrent/QtConcurrent>
 #include <QFuture>
 #include <QFutureWatcher>
@@ -31,48 +30,47 @@
 #include "block.h"
 #include "inventory.h"
 
-
-// 使用 GLM 的哈希函数
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/hash.hpp>
 
-// --- 区块定义 ---
 class Chunk {
 public:
     static const int CHUNK_SIZE = 16;
     Chunk();
     ~Chunk();
 
-    // 不透明物体的缓冲
     QOpenGLVertexArrayObject vao;
     QOpenGLBuffer vbo;
     int vertex_count = 0;
     std::vector<Vertex> mesh_data;
 
-    // 半透明物体的缓冲
     QOpenGLVertexArrayObject vao_transparent;
     QOpenGLBuffer vbo_transparent;
     int vertex_count_transparent = 0;
     std::vector<Vertex> mesh_data_transparent;
 
     uint8_t blocks[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE] = {{{0}}};
-    uint8_t lighting[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE] = {{{0}}}; // 新增：光照数据
+    uint8_t lighting[CHUNK_SIZE][CHUNK_SIZE][CHUNK_SIZE] = {{{0}}};
     bool needs_remeshing = true;
 
-    // --- 新增状态和数据成员 ---
     bool is_building = false;
     glm::ivec3 coords;
 };
 
-// --- 玩家包围盒定义 ---
 struct AABB {
     glm::vec3 min;
     glm::vec3 max;
 };
 
+// --- 新增：定义光照更新节点结构体 ---
+// 用于在洪水填充算法中传递方块位置和光照等级，比 std::pair 更清晰
+struct LightNode {
+    glm::ivec3 pos;
+    uint8_t level;
+};
 
 class OpenGLWindow : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core
 {
@@ -97,9 +95,14 @@ private slots:
     void handleChunkMeshReady();
 
 private:
-    // --- 光照更新队列 ---
-    std::queue<std::pair<glm::ivec3, int>> m_light_propagation_queue;
-    std::queue<std::pair<glm::ivec3, int>> m_light_removal_queue;
+    // --- 光照系统成员变量和函数修改 ---
+    std::queue<LightNode> m_light_propagation_queue; // 更新队列类型为 LightNode
+    // m_light_removal_queue 已被移除，因为光照移除现在是 setBlock 中的局部操作
+
+    // 新增私有函数，用于即时光照更新
+    void removeLight(std::queue<LightNode>& removal_queue);
+    void propagateLight(std::queue<LightNode>& propagation_queue);
+    // ------------------------------------
 
     void generateWorld();
     void generateChunk(Chunk* chunk, const glm::ivec3& chunk_coords);
@@ -113,19 +116,16 @@ private:
     AABB getPlayerAABB(const glm::vec3& position) const;
     bool raycast(glm::ivec3& hit_block, glm::ivec3& adjacent_block);
     void initShaders();
-    int findSafeSpawnY(int x, int z); // 新增函数声明
+    int findSafeSpawnY(int x, int z);
 
-    // --- 新增光照相关函数 ---
     void initializeSunlight();
-    void propagateLight();
-    void depropagateLight();
     uint8_t getLight(const glm::ivec3& world_pos);
     void setLight(const glm::ivec3& world_pos, uint8_t level);
 
     void initTextures();
     void initCrosshair();
     void initInventoryBar();
-    void initOverlay(); // 新增初始化函数
+    void initOverlay();
 
     QOpenGLShaderProgram m_program;
     QOpenGLTexture *m_texture_atlas = nullptr;
@@ -134,7 +134,6 @@ private:
     GLint m_model_matrix_location;
     QTimer m_timer;
 
-    // 2D UI 渲染资源
     QOpenGLVertexArrayObject m_ui_vao;
     QOpenGLBuffer m_ui_vbo;
     QOpenGLShaderProgram m_ui_program;
@@ -146,31 +145,27 @@ private:
     GLint m_ui_uv_offset_location;
     GLint m_ui_uv_scale_location;
 
-
-    // 准星
     QOpenGLVertexArrayObject m_crosshair_vao;
     QOpenGLBuffer m_crosshair_vbo;
     QOpenGLShaderProgram m_crosshair_program;
     GLint m_crosshair_proj_matrix_location;
 
-    // 水下效果专用资源
     QOpenGLVertexArrayObject m_overlay_vao;
     QOpenGLBuffer m_overlay_vbo;
     QOpenGLShaderProgram m_overlay_program;
     GLint m_overlay_color_location;
 
-
     Camera m_camera;
     Inventory m_inventory;
     glm::vec3 m_player_velocity = glm::vec3(0.0f);
     bool m_is_on_ground = false;
-
-    // 新增状态
     bool m_is_in_water = false;
+    bool m_is_flying = false; // 飞行状态
 
     QSet<int> m_pressed_keys;
 
     QElapsedTimer m_elapsed_timer;
+    QElapsedTimer m_space_press_timer; // 用于检测双击
 
     bool m_cursor_locked = false;
     bool m_just_locked_cursor = false;
